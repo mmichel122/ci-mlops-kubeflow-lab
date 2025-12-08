@@ -1,0 +1,35 @@
+name: Deploy Housing Pipeline
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/**'  # Only run if python code changes
+      - 'requirements.txt'
+
+jobs:
+  build-and-run:
+    runs-on: self-hosted  # <--- CRITICAL: Targets your K3s Node
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v3
+
+      - name: Install Dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Compile and Run Pipeline
+        env:
+          # We don't need AWS keys because we use the Instance Profile!
+          # But we do need to know where Kubeflow lives (Internal DNS)
+          KFP_HOST: "http://localhost:8080" 
+        run: |
+          echo "🚀 Compiling and Submitting Pipeline..."
+          
+          # Run your python script
+          # (Ensure your script has the __main__ block that compiles AND runs it)
+          # If your script only compiles, we need to add the 'client.run_pipeline' logic back to main
+          python3 src/housing_pipeline.py
+          
+          echo "✅ Pipeline Submitted to Local Cluster!"
