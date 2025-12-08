@@ -193,7 +193,7 @@ def housing_pipeline(
     task_drift = detect_drift(
         new_data=task_data.outputs['output_csv'],
         reference_bucket=bucket_name,
-        reference_key="data/housing.csv" # Hardcoded baseline for now
+        reference_key="data/housing.csv"
     )
     
     # 3. Conditional Training
