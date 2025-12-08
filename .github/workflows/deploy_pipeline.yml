@@ -28,7 +28,6 @@ jobs:
           echo "🚀 Compiling and Submitting Pipeline..."
           
           # Run your python script
-          # (Ensure your script has the __main__ block that compiles AND runs it)
           # If your script only compiles, we need to add the 'client.run_pipeline' logic back to main
           python3 src/housing_pipeline.py
           
