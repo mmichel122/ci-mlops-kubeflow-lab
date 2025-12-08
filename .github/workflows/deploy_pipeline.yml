@@ -16,13 +16,13 @@ jobs:
 
       - name: Set up Virtual Environment & Install Dependencies
         run: |
-          # 1. Create a virtual environment named 'venv'
+          # 1. Create a virtual environment named 'venv'.
           python3 -m venv venv
           
-          # 2. Upgrade pip inside the venv
+          # 2. Upgrade pip inside the venv.
           venv/bin/pip install --upgrade pip
           
-          # 3. Install requirements inside the venv
+          # 3. Install requirements inside the venv.
           venv/bin/pip install -r requirements.txt
 
       - name: Compile and Run Pipeline
