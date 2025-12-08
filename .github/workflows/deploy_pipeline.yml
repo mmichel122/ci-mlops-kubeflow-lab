@@ -4,31 +4,34 @@ on:
     branches:
       - main
     paths:
-      - 'src/**'  # Only run if python code changes
+      - 'src/**'
       - 'requirements.txt'
 
 jobs:
   build-and-run:
-    runs-on: self-hosted  # <--- CRITICAL: Targets your K3s Node
+    runs-on: self-hosted
     steps:
       - name: Check out repository
         uses: actions/checkout@v3
 
-      - name: Install Dependencies
+      - name: Set up Virtual Environment & Install Dependencies
         run: |
-          python3 -m pip install --upgrade pip
-          pip install -r requirements.txt
+          # 1. Create a virtual environment named 'venv'
+          python3 -m venv venv
+          
+          # 2. Upgrade pip inside the venv
+          venv/bin/pip install --upgrade pip
+          
+          # 3. Install requirements inside the venv
+          venv/bin/pip install -r requirements.txt
 
       - name: Compile and Run Pipeline
         env:
-          # We don't need AWS keys because we use the Instance Profile!
-          # But we do need to know where Kubeflow lives (Internal DNS)
-          KFP_HOST: "http://localhost:8080" 
+          KFP_HOST: "http://localhost:8080"
         run: |
           echo "🚀 Compiling and Submitting Pipeline..."
           
-          # Run your python script
-          # If your script only compiles, we need to add the 'client.run_pipeline' logic back to main
-          python3 src/housing_pipeline.py
+          # 4. Run the script using the venv's python
+          venv/bin/python src/housing_pipeline.py
           
           echo "✅ Pipeline Submitted to Local Cluster!"
