@@ -39,3 +39,4 @@ terraform.rc
 # Python
 .venv
 .python-version*
+.DS_Store

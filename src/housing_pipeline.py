@@ -210,8 +210,36 @@ def housing_pipeline(
         )
 
 if __name__ == "__main__":
+    # 1. Compile
+    package_path = 'housing_pipeline_gitops.yaml'
     compiler.Compiler().compile(
         pipeline_func=housing_pipeline,
-        package_path='housing_pipeline_gitops.yaml'
+        package_path=package_path
     )
-    logger.info("✅ Compiled to 'housing_pipeline_gitops.yaml'")
+    logger.info(f"✅ Compiled to {package_path}")
+
+    # 2. Deploy (The missing part!)
+    import kfp
+    import sys
+    
+    # We use localhost because the Runner is ON the same machine as the cluster
+    client = kfp.Client(host='http://localhost:8080')
+    
+    logger.info("🚀 Auto-Submitting to Kubeflow...")
+    
+    try:
+        # We use create_run_from_pipeline_package to upload & run in one shot
+        run = client.create_run_from_pipeline_package(
+            pipeline_file=package_path,
+            arguments={
+                "bucket_name": "mlops-housing-data-drift",
+                "object_key": "data/housing.csv"
+            },
+            run_name="Git-Triggered-Run",
+            enable_caching=True
+        )
+        logger.info(f"✅ Pipeline Successfully Submitted! Run ID: {run.run_id}")
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to submit pipeline: {e}")
+        sys.exit(1) # Fail the CI/CD job
