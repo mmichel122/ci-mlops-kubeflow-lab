@@ -18,7 +18,7 @@ def deploy():
     print(f"2. Connecting to Kubeflow at {KUBEFLOW_HOST}...")
     client = kfp.Client(host=KUBEFLOW_HOST)
 
-    # Check if pipeline exists
+    # Check if the pipeline exists
     existing_pipelines = client.list_pipelines(filter=dict(name=PIPELINE_NAME))
     
     if existing_pipelines.pipelines:
