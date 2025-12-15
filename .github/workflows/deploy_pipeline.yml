@@ -1,37 +1,44 @@
-name: Deploy Housing Pipeline
+name: Build and Deploy Anime Pipeline
+
 on:
   push:
-    branches:
-      - main
+    branches: [ "main" ]
     paths:
-      - 'src/**'
-      - 'requirements.txt'
+      - 'k3s-ops/anime-training/**'
+      - 'src/pipeline.py'
 
 jobs:
-  build-and-run:
-    runs-on: self-hosted
+  build-and-deploy:
+    runs-on: ubuntu-latest
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v3
+    - name: Checkout Code
+      uses: actions/checkout@v3
 
-      - name: Set up Virtual Environment & Install Dependencies
-        run: |
-          # 1. Create a virtual environment named 'venv'.
-          python3 -m venv venv
-          
-          # 2. Upgrade pip inside the venv.
-          venv/bin/pip install --upgrade pip
-          
-          # 3. Install requirements inside the venv.
-          venv/bin/pip install -r requirements.txt
+    - name: Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: us-east-1
 
-      - name: Compile and Run Pipeline
-        env:
-          KFP_HOST: "http://localhost:8080"
-        run: |
-          echo "🚀 Compiling and Submitting Pipeline..."
-          
-          # 4. Run the script using the venv's python
-          venv/bin/python src/housing_pipeline.py
-          
-          echo "✅ Pipeline Submitted to Local Cluster!"
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+
+    - name: Build, tag, and push image to Amazon ECR
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        ECR_REPOSITORY: anime-ops
+        IMAGE_TAG: latest
+      run: |
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG k3s-ops/anime-training
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
+    - name: Deploy Pipeline to Kubeflow
+      run: |
+        pip install kfp
+        python scripts/deploy.py
+      env:
+        # If your K3s cluster is accessible from the internet (e.g. via LoadBalancer)
+        # If running locally, you might need a self-hosted runner.
+        KUBEFLOW_HOST: ${{ secrets.KUBEFLOW_HOST }}
