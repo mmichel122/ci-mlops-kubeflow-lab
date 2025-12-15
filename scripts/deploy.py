@@ -10,7 +10,7 @@ from src.pipeline import anime_pipeline
 # Configuration
 PIPELINE_FILE = 'anime_pipeline.yaml'
 PIPELINE_NAME = 'Anime Recommender Training'
-KUBEFLOW_HOST = 'http://localhost:8080/pipeline'
+KUBEFLOW_HOST = 'http://10.43.248.45/pipeline'
 
 def deploy():
     print(f"1. Compiling Pipeline (KFP v2)...")
