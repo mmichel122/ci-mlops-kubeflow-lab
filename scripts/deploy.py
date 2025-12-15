@@ -1,32 +1,35 @@
 import kfp
-import os
 import sys
+import os
+
+# Import your pipeline function directly
+# We need to add the project root to path so we can import src.pipeline
+sys.path.append(os.getcwd())
+from src.pipeline import anime_pipeline
 
 # Configuration
 PIPELINE_FILE = 'anime_pipeline.yaml'
 PIPELINE_NAME = 'Anime Recommender Training'
-KUBEFLOW_HOST = 'http://localhost:8080/pipeline' # Adjust if using port-forwarding
+KUBEFLOW_HOST = 'http://localhost:8080/pipeline'
 
 def deploy():
-    print(f"1. Compiling Pipeline...")
-    # Compile src/pipeline.py -> anime_pipeline.yaml
-    exit_code = os.system(f"dsl-compile --py src/pipeline.py --output {PIPELINE_FILE}")
-    if exit_code != 0:
-        print("Compilation Failed!")
-        sys.exit(1)
-
+    print(f"1. Compiling Pipeline (KFP v2)...")
+    
+    # Use the Python SDK compiler, NOT os.system
+    from kfp.compiler import Compiler
+    Compiler().compile(pipeline_func=anime_pipeline, package_path=PIPELINE_FILE)
+    
     print(f"2. Connecting to Kubeflow at {KUBEFLOW_HOST}...")
     client = kfp.Client(host=KUBEFLOW_HOST)
 
-    # Check if the pipeline exists
+    # Check if pipeline exists
+    # Note: KFP v2 client might return different structures, this is a robust check
     existing_pipelines = client.list_pipelines(filter=dict(name=PIPELINE_NAME))
     
     if existing_pipelines.pipelines:
         pipeline_id = existing_pipelines.pipelines[0].id
         print(f"3. Found existing pipeline ID: {pipeline_id}. Uploading new version...")
         
-        # Upload a new version to the existing pipeline
-        # Use a version name based on git commit or timestamp usually
         import time
         version_name = f"v-{int(time.time())}"
         
