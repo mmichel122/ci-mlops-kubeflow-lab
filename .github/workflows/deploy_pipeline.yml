@@ -44,7 +44,7 @@ jobs:
         source venv/bin/activate
         pip install kfp
         
-        # Run your script INSIDE the virtual environment
+        # Run your script INSIDE the virtual environment with new local url
         python scripts/deploy.py
       env:
         # If your K3s cluster is accessible from the internet (e.g. via LoadBalancer)
