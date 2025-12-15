@@ -16,7 +16,7 @@ jobs:
       uses: actions/checkout@v3
 
     - name: Configure AWS Credentials
-      uses: aws-actions/configure-aws-credentials@v1
+      uses: aws-actions/configure-aws-credentials@v2
       with:
         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -37,7 +37,14 @@ jobs:
 
     - name: Deploy Pipeline to Kubeflow
       run: |
+        # Create a virtual environment named 'venv'
+        python3 -m venv venv
+        
+        # Activate it and install
+        source venv/bin/activate
         pip install kfp
+        
+        # Run your script INSIDE the virtual environment
         python scripts/deploy.py
       env:
         # If your K3s cluster is accessible from the internet (e.g. via LoadBalancer)
