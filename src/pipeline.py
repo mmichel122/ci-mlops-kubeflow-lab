@@ -3,10 +3,6 @@ from kfp import dsl
 
 
 def _training_image() -> str:
-    """
-    Image is provided by CI at compile time:
-      TRAINING_IMAGE=mmdocker06/anime-ops-training:<sha>
-    """
     img = os.getenv("TRAINING_IMAGE")
     if not img:
         raise ValueError(
@@ -23,6 +19,7 @@ def train_recommender(
     model_key: str,
     max_features: int,
     ngram_max: int,
+    metrics_path: dsl.OutputPath(str),
 ):
     return dsl.ContainerSpec(
         image=_training_image(),
@@ -33,6 +30,7 @@ def train_recommender(
             "--model_key", model_key,
             "--max_features", str(max_features),
             "--ngram_max", str(ngram_max),
+            "--metrics_path", metrics_path,
         ],
     )
 
@@ -42,8 +40,8 @@ def evaluate_recommender(
     bucket_name: str,
     model_key: str,
     min_mean_similarity: float,
+    metrics_path: dsl.OutputPath(str),
 ):
-    # Reuse the same image so you don't need to publish a second one.
     return dsl.ContainerSpec(
         image=_training_image(),
         command=["python", "evaluate.py"],
@@ -51,6 +49,7 @@ def evaluate_recommender(
             "--bucket_name", bucket_name,
             "--model_key", model_key,
             "--min_mean_similarity", str(min_mean_similarity),
+            "--metrics_path", metrics_path,
         ],
     )
 
