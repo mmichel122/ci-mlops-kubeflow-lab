@@ -23,8 +23,8 @@ jobs:
       DOCKERHUB_REPO_APP: mmdocker06/anime-ops-app
       DOCKERHUB_REPO_TRAIN: mmdocker06/anime-ops-training
 
-      # KFP API endpoint (NOT the UI). Adjust namespace if needed.
-      KFP_HOST: http://10.43.248.45
+      # KFP API endpoint (NOT the UI)
+      KFP_HOST: http://10.200.1.76:30081
 
     steps:
       - name: Checkout
@@ -73,11 +73,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Check KFP API reachable
+        run: |
+          curl -sS -m 5 "$KFP_HOST/apis/v1beta1/healthz" || (echo "KFP API not reachable at $KFP_HOST" && exit 1)
+
       - name: Compile & deploy pipeline
         env:
           TRAINING_IMAGE: ${{ env.DOCKERHUB_REPO_TRAIN }}:${{ github.sha }}
           SERVING_IMAGE:  ${{ env.DOCKERHUB_REPO_APP }}:${{ github.sha }}
+          # set to "1" if you want a run each push (only works if deploy.py supports it)
+          CREATE_RUN: "1"
         run: |
-          # pass the host explicitly so deploy.py can read it
           export KUBEFLOW_HOST="${KFP_HOST}"
           python scripts/deploy.py
