@@ -1,36 +1,35 @@
-\
 import argparse
 import os
-from dataclasses import dataclass
-from typing import List, Optional, Dict, Any, Tuple
-
-import boto3
 import joblib
-import numpy as np
 import pandas as pd
-from scipy import sparse
+import boto3
+import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-
+from dataclasses import dataclass
+from typing import List, Dict, Any
+from scipy import sparse
 
 def _s3_client():
-    # Relies on standard AWS env/IRSA: AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_SESSION_TOKEN or IAM role.
+    """Return a boto3 client for S3."""
     return boto3.client("s3")
 
 
 def download_from_s3(bucket: str, key: str, dst_path: str) -> str:
+    """Download a file from S3 to a local path."""
     os.makedirs(os.path.dirname(dst_path), exist_ok=True)
     _s3_client().download_file(bucket, key, dst_path)
     return dst_path
 
 
 def upload_to_s3(src_path: str, bucket: str, key: str) -> str:
+    """Upload a local file to S3."""
     _s3_client().upload_file(src_path, bucket, key)
     return f"s3://{bucket}/{key}"
 
 
 def normalize_title(row: pd.Series) -> str:
-    # Prefer English, then Japanese, then Synonyms, otherwise fall back to index.
+    """Normalize the title by checking various fields (English, Japanese, Synonyms)."""
     for col in ("English", "Japanese", "Synonyms"):
         val = row.get(col, None)
         if isinstance(val, str) and val.strip():
@@ -39,11 +38,9 @@ def normalize_title(row: pd.Series) -> str:
 
 
 def build_corpus(df: pd.DataFrame) -> List[str]:
-    # Combine several fields into one text blob per anime.
+    """Combine different fields into one text blob for each anime."""
     def _get(col: str) -> pd.Series:
-        if col in df.columns:
-            return df[col].fillna("").astype(str)
-        return pd.Series([""] * len(df))
+        return df.get(col, pd.Series([""] * len(df)))
 
     parts = [
         _get("Description"),
@@ -55,85 +52,71 @@ def build_corpus(df: pd.DataFrame) -> List[str]:
         _get("Demographic"),
         _get("Rating"),
     ]
-    corpus = (parts[0]
-              + " | " + parts[1]
-              + " | " + parts[2]
-              + " | " + parts[3]
-              + " | " + parts[4]
-              + " | " + parts[5]
-              + " | " + parts[6]
-              + " | " + parts[7]
-              ).tolist()
+    corpus = (parts[0] + " | " + parts[1] + " | " + parts[2] + " | " + parts[3]
+              + " | " + parts[4] + " | " + parts[5] + " | " + parts[6] + " | " + parts[7]).tolist()
     return corpus
 
 
 @dataclass
 class RecommenderModel:
+    """A dataclass for the recommender model."""
     titles: List[str]
     tfidf: sparse.csr_matrix
     vectorizer: TfidfVectorizer
     meta: pd.DataFrame
 
     def recommend(self, title: str, k: int = 10) -> List[Dict[str, Any]]:
+        """Return top-k recommendations for a given anime title."""
         title_norm = title.strip().lower()
-        # match by exact normalized title; fallback to contains.
         titles_lower = [t.lower() for t in self.titles]
-        idx = None
-        if title_norm in titles_lower:
-            idx = titles_lower.index(title_norm)
-        else:
-            # contains match
+        idx = titles_lower.index(title_norm) if title_norm in titles_lower else None
+
+        if idx is None:
             for i, t in enumerate(titles_lower):
                 if title_norm in t:
                     idx = i
                     break
+
         if idx is None:
             raise ValueError(f"Unknown title: {title}")
 
         sims = cosine_similarity(self.tfidf[idx], self.tfidf).ravel()
-        # exclude itself
-        sims[idx] = -1.0
+        sims[idx] = -1.0  # Exclude itself
         top_idx = np.argsort(-sims)[:k]
-        out = []
+
+        recommendations = []
         for j in top_idx:
-            rec = {
-                "title": self.titles[j],
-                "score": float(sims[j]),
-            }
-            # attach a bit of metadata if present
+            rec = {"title": self.titles[j], "score": float(sims[j])}
             for col in ("Score", "Popularity", "Rank", "Type", "Episodes", "Studios", "Genres"):
                 if col in self.meta.columns:
                     val = self.meta.iloc[j][col]
                     if pd.notna(val):
                         rec[col.lower()] = val if not isinstance(val, (np.generic,)) else val.item()
-            out.append(rec)
-        return out
+            recommendations.append(rec)
+
+        return recommendations
 
 
 def train(df: pd.DataFrame, max_features: int = 50000, ngram_max: int = 2) -> RecommenderModel:
-    df = df.copy()
+    """Train a content-based recommender model."""
     df["__title__"] = df.apply(normalize_title, axis=1)
     df = df.drop_duplicates(subset="__title__", keep="first").reset_index(drop=True)
 
     corpus = build_corpus(df)
-    vectorizer = TfidfVectorizer(
-        stop_words="english",
-        max_features=max_features,
-        ngram_range=(1, ngram_max),
-        min_df=2,
-    )
+    vectorizer = TfidfVectorizer(stop_words="english", max_features=max_features, ngram_range=(1, ngram_max), min_df=2)
     tfidf = vectorizer.fit_transform(corpus)
     meta_cols = [c for c in df.columns if c not in ("Description",)]
     meta = df[meta_cols].copy()
+
     return RecommenderModel(titles=df["__title__"].tolist(), tfidf=tfidf, vectorizer=vectorizer, meta=meta)
 
 
 def compute_basic_metrics(df: pd.DataFrame, model: RecommenderModel) -> Dict[str, Any]:
-    # Not a "true" offline eval; just sanity stats for the pipeline UI.
-    metrics: Dict[str, Any] = {
-        "num_items": int(len(model.titles)),
-        "tfidf_nonzero": int(model.tfidf.nnz),
-        "avg_title_len": float(np.mean([len(t) for t in model.titles])) if model.titles else 0.0,
+    """Compute basic metrics for the model."""
+    metrics = {
+        "num_items": len(model.titles),
+        "tfidf_nonzero": model.tfidf.nnz,
+        "avg_title_len": np.mean([len(t) for t in model.titles]) if model.titles else 0.0
     }
     if "Score" in df.columns:
         metrics["avg_score"] = float(pd.to_numeric(df["Score"], errors="coerce").dropna().mean())
