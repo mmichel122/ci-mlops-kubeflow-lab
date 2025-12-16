@@ -28,11 +28,11 @@ def train_recommender(
         image=_training_image(),
         command=["python", "train.py"],
         args=[
-            "--bucket-name", bucket_name,
-            "--data-key", data_key,
-            "--model-key", model_key,
-            "--max-features", str(max_features),
-            "--ngram-max", str(ngram_max),
+            "--bucket_name", bucket_name,
+            "--data_key", data_key,
+            "--model_key", model_key,
+            "--max_features", str(max_features),
+            "--ngram_max", str(ngram_max),
         ],
     )
 
@@ -48,9 +48,9 @@ def evaluate_recommender(
         image=_training_image(),
         command=["python", "evaluate.py"],
         args=[
-            "--bucket-name", bucket_name,
-            "--model-key", model_key,
-            "--min-mean-similarity", str(min_mean_similarity),
+            "--bucket_name", bucket_name,
+            "--model_key", model_key,
+            "--min_mean_similarity", str(min_mean_similarity),
         ],
     )
 
@@ -74,16 +74,13 @@ def pipeline(
         max_features=max_features,
         ngram_max=ngram_max,
     )
-
     train_task.set_cpu_request("500m").set_cpu_limit("2")
     train_task.set_memory_request("1Gi").set_memory_limit("4Gi")
 
-    # Evaluation (fails pipeline if quality is below threshold)
     eval_task = evaluate_recommender(
         bucket_name=bucket_name,
         model_key=model_key,
         min_mean_similarity=min_mean_similarity,
     ).after(train_task)
-
     eval_task.set_cpu_request("250m").set_cpu_limit("1")
     eval_task.set_memory_request("512Mi").set_memory_limit("2Gi")
