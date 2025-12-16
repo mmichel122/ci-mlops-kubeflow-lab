@@ -85,4 +85,5 @@ jobs:
           CREATE_RUN: "1"
         run: |
           export KUBEFLOW_HOST="${KFP_HOST}"
+          export PYTHONPATH="${GITHUB_WORKSPACE}"
           python scripts/deploy.py
