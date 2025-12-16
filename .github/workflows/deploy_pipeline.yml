@@ -1,52 +1,86 @@
-name: Build and Deploy Anime Pipeline
+name: Build and Deploy AnimeOps
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
     paths:
-      - 'components/training/**'
-      - 'src/pipeline.py'
-      - '.github/workflows/**'
+      - "components/training/**"
+      - "components/serving/**"
+      - "src/**"
+      - "scripts/**"
+      - "requirements.txt"
+      - ".github/workflows/**"
+
+concurrency:
+  group: animeops-main
+  cancel-in-progress: true
 
 jobs:
   build-and-deploy:
     runs-on: self-hosted
+
+    env:
+      DOCKERHUB_REPO_APP: mmdocker06/anime-ops-app
+      DOCKERHUB_REPO_TRAIN: mmdocker06/anime-ops-training
+
     steps:
-    - name: Checkout Code
-      uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Configure AWS Credentials
-      uses: aws-actions/configure-aws-credentials@v2
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: eu-west-3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-    - name: Login to Amazon ECR
-      id: login-ecr
-      uses: aws-actions/amazon-ecr-login@v2
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-    - name: Build, tag, and push image to Amazon ECR
-      env:
-        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-        ECR_REPOSITORY: anime-ops
-        IMAGE_TAG: latest
-      run: |
-        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG components/training
-        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+      # ---------- Build & push SERVING image (requested) ----------
+      - name: Build and push serving image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./components/serving
+          file: ./components/serving/Dockerfile
+          push: true
+          tags: |
+            ${{ env.DOCKERHUB_REPO_APP }}:latest
+            ${{ env.DOCKERHUB_REPO_APP }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-    - name: Deploy Pipeline to Kubeflow
-      run: |
-        # Create a virtual environment named 'venv'
-        python3 -m venv venv
-        
-        # Activate it and install
-        source venv/bin/activate
-        pip install kfp
-        
-        # Run your script INSIDE the virtual environment with new local url
-        python scripts/deploy.py
-      env:
-        # If your K3s cluster is accessible from the internet (e.g. via LoadBalancer)
-        # If running locally, you might need a self-hosted runner.
-        KUBEFLOW_HOST: ${{ secrets.KUBE_CONFIG}}
+      # ---------- Optional: Build & push TRAINING image ----------
+      - name: Build and push training image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./components/training
+          file: ./components/training/Dockerfile
+          push: true
+          tags: |
+            ${{ env.DOCKERHUB_REPO_TRAIN }}:latest
+            ${{ env.DOCKERHUB_REPO_TRAIN }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ---------- Deploy pipeline to Kubeflow ----------
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Compile & deploy pipeline
+        env:
+          # Use SHA tag so the pipeline always points at the exact image built by this commit
+          TRAINING_IMAGE: ${{ env.DOCKERHUB_REPO_TRAIN }}:${{ github.sha }}
+          SERVING_IMAGE:  ${{ env.DOCKERHUB_REPO_APP }}:${{ github.sha }}
+
+          # You need to set these secrets appropriately for your Kubeflow endpoint/auth
+          KUBEFLOW_HOST:  ${{ secrets.KUBEFLOW_HOST }}
+          KUBEFLOW_TOKEN: ${{ secrets.KUBEFLOW_TOKEN }}
+        run: |
+          python scripts/deploy.py

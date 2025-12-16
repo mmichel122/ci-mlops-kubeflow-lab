@@ -1,16 +1,10 @@
-FROM python:3.9-slim
+FROM python:3.11-slim
 
 WORKDIR /app
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# Install dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY components/training /app/components/training
+ENV PYTHONPATH=/app
 
-# Copy the script
-COPY train.py .
-
-# Output directory for artifacts
-RUN mkdir -p model_artifacts
-
-# Entrypoint
-ENTRYPOINT ["python", "train.py"]
+ENTRYPOINT ["python", "-m", "components.training.train"]
