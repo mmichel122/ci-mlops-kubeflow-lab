@@ -1,0 +1,87 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: animeops-serving
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: animeops-serving
+  namespace: animeops-serving
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: animeops-serving
+  template:
+    metadata:
+      labels:
+        app: animeops-serving
+    spec:
+      terminationGracePeriodSeconds: 10
+      containers:
+        - name: api
+          image: mmdocker06/anime-ops-app:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+
+          env:
+            # Ensure boto3 uses the correct region
+            - name: AWS_REGION
+              value: "eu-west-3"
+            - name: AWS_DEFAULT_REGION
+              value: "eu-west-3"
+
+            - name: MODEL_S3_BUCKET
+              value: "mlops-anime-data"
+            - name: MODEL_S3_KEY
+              value: "models/anime_recommender/model.joblib"
+            - name: MODEL_LOCAL_PATH
+              value: "/tmp/model/model.joblib"
+            - name: DEFAULT_K
+              value: "10"
+            - name: MAX_K
+              value: "50"
+
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 6
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: animeops-serving
+  namespace: animeops-serving
+spec:
+  type: NodePort
+  selector:
+    app: animeops-serving
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      nodePort: 30082

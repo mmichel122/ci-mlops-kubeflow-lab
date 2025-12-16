@@ -10,6 +10,7 @@ on:
       - "scripts/**"
       - "requirements.txt"
       - ".github/workflows/**"
+      - "k8s/**"
 
 concurrency:
   group: animeops-main
@@ -39,6 +40,7 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      # ---------- Build & push SERVING image ----------
       - name: Build and push serving image
         uses: docker/build-push-action@v6
         with:
@@ -51,6 +53,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # ---------- Build & push TRAINING image ----------
       - name: Build and push training image
         uses: docker/build-push-action@v6
         with:
@@ -63,6 +66,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # ---------- Kubeflow pipeline ----------
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -75,15 +79,31 @@ jobs:
 
       - name: Check KFP API reachable
         run: |
-          curl -sS -m 5 "$KFP_HOST/apis/v1beta1/healthz" || (echo "KFP API not reachable at $KFP_HOST" && exit 1)
+          curl -sS -m 5 "$KFP_HOST/apis/v1beta1/healthz" \
+            || (echo "KFP API not reachable at $KFP_HOST" && exit 1)
 
       - name: Compile & deploy pipeline
         env:
           TRAINING_IMAGE: ${{ env.DOCKERHUB_REPO_TRAIN }}:${{ github.sha }}
           SERVING_IMAGE:  ${{ env.DOCKERHUB_REPO_APP }}:${{ github.sha }}
-          # set to "1" if you want a run each push (only works if deploy.py supports it)
           CREATE_RUN: "1"
         run: |
           export KUBEFLOW_HOST="${KFP_HOST}"
           export PYTHONPATH="${GITHUB_WORKSPACE}"
           python scripts/deploy.py
+
+      # ---------- Deploy serving app to Kubernetes ----------
+      - name: Deploy AnimeOps serving app
+        run: |
+          echo "Deploying serving app to k3s…"
+
+          # Apply manifests (namespace, deployment, service)
+          sudo kubectl apply -f k8s/manifest.yaml
+
+          # Pin the serving image to this commit SHA
+          sudo kubectl -n animeops-serving set image \
+            deploy/animeops-serving \
+            api=${{ env.DOCKERHUB_REPO_APP }}:${{ github.sha }}
+
+          # Ensure rollout happens
+          sudo kubectl -n animeops-serving rollout status deploy/animeops-serving
