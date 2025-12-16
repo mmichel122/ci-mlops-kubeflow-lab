@@ -23,6 +23,9 @@ jobs:
       DOCKERHUB_REPO_APP: mmdocker06/anime-ops-app
       DOCKERHUB_REPO_TRAIN: mmdocker06/anime-ops-training
 
+      # KFP API endpoint (NOT the UI). Adjust namespace if needed.
+      KFP_HOST: http://10.43.248.45
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -36,7 +39,6 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # ---------- Build & push SERVING image (requested) ----------
       - name: Build and push serving image
         uses: docker/build-push-action@v6
         with:
@@ -49,7 +51,6 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # ---------- Optional: Build & push TRAINING image ----------
       - name: Build and push training image
         uses: docker/build-push-action@v6
         with:
@@ -62,7 +63,6 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # ---------- Deploy pipeline to Kubeflow ----------
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -75,12 +75,9 @@ jobs:
 
       - name: Compile & deploy pipeline
         env:
-          # Use SHA tag so the pipeline always points at the exact image built by this commit
           TRAINING_IMAGE: ${{ env.DOCKERHUB_REPO_TRAIN }}:${{ github.sha }}
           SERVING_IMAGE:  ${{ env.DOCKERHUB_REPO_APP }}:${{ github.sha }}
-
-          # You need to set these secrets appropriately for your Kubeflow endpoint/auth
-          KUBEFLOW_HOST:  ${{ secrets.KUBEFLOW_HOST }}
-          KUBEFLOW_TOKEN: ${{ secrets.KUBEFLOW_TOKEN }}
         run: |
+          # pass the host explicitly so deploy.py can read it
+          export KUBEFLOW_HOST="${KFP_HOST}"
           python scripts/deploy.py
