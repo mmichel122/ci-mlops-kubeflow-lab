@@ -5,9 +5,9 @@ import boto3
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--bucket-name", required=True)
-    parser.add_argument("--model-key", required=True)
-    parser.add_argument("--min-mean-similarity", type=float, required=True)
+    parser.add_argument("--bucket_name", required=True)
+    parser.add_argument("--model_key", required=True)
+    parser.add_argument("--min_mean_similarity", type=float, required=True)
     args = parser.parse_args()
 
     s3 = boto3.client("s3")
