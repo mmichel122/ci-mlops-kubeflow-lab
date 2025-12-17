@@ -11,7 +11,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 MODEL_LOCAL_PATH = os.getenv("MODEL_LOCAL_PATH", "/tmp/model/model.joblib")
 S3_BUCKET = os.getenv("MODEL_S3_BUCKET", "mlops-anime-data")
-S3_KEY = os.getenv("MODEL_S3_KEY", "models/anime_recommender/model.joblib")
+S3_KEY = os.getenv("MODEL_S3_KEY", "models/anime_recommender/approved/model.joblib")
 
 DEFAULT_K = int(os.getenv("DEFAULT_K", "10"))
 MAX_K = int(os.getenv("MAX_K", "50"))
@@ -20,15 +20,21 @@ app = FastAPI(title="AnimeOps Recommender", version="0.2.0")
 
 _model: Optional[Dict[str, Any]] = None
 _titles_lower: Optional[List[str]] = None
+_model_etag: Optional[str] = None
 
 
 def _s3_client():
     return boto3.client("s3")
 
 
-def _download_model() -> None:
+def _download_model() -> str:
     os.makedirs(os.path.dirname(MODEL_LOCAL_PATH), exist_ok=True)
-    _s3_client().download_file(S3_BUCKET, S3_KEY, MODEL_LOCAL_PATH)
+    s3 = _s3_client()
+    head = s3.head_object(Bucket=S3_BUCKET, Key=S3_KEY)
+    etag = head.get("ETag", "").strip('"')
+    s3.download_file(S3_BUCKET, S3_KEY, MODEL_LOCAL_PATH)
+    return etag
+
 
 
 def _load_model_from_disk() -> Dict[str, Any]:
@@ -102,7 +108,7 @@ def recommend_from_artifact(artifact: Dict[str, Any], title: str, k: int) -> Lis
 
     recs: List[Dict[str, Any]] = []
     for j in top_idx:
-        rec = {"title": titles[j], "score": float(sims[j])}
+        rec = {"title": titles[j], "similarity": float(sims[j])}
         rec.update(_get_meta_row(meta, j))
         recs.append(rec)
     return recs
@@ -110,16 +116,34 @@ def recommend_from_artifact(artifact: Dict[str, Any], title: str, k: int) -> Lis
 
 @app.on_event("startup")
 def startup_load():
-    global _model, _titles_lower
+    global _model, _titles_lower, _model_etag
     try:
-        _download_model()
+        etag = _download_model()
         _model = _load_model_from_disk()
+        _model_etag = etag
         _titles_lower = None
     except Exception as e:
-        # Service stays up; healthz will be 503 until model loads
         _model = None
         _titles_lower = None
+        _model_etag = None
         print(f"Failed to load model: {e}")
+
+
+@app.post("/reload")
+def reload_model():
+    """Manual reload without restart (handy during ops)."""
+    global _model, _titles_lower, _model_etag
+    try:
+        etag = _download_model()
+        _model = _load_model_from_disk()
+        _model_etag = etag
+        _titles_lower = None
+        return {"status": "reloaded", "model_key": S3_KEY, "etag": _model_etag}
+    except Exception as e:
+        _model = None
+        _titles_lower = None
+        _model_etag = None
+        raise HTTPException(status_code=500, detail=f"failed to reload model: {e}")
 
 
 class RecommendResponse(BaseModel):
@@ -132,22 +156,7 @@ class RecommendResponse(BaseModel):
 def healthz():
     if _model is None:
         raise HTTPException(status_code=503, detail="model not loaded")
-    return {"status": "ok", "model_key": S3_KEY}
-
-
-@app.post("/reload")
-def reload_model():
-    """Manual reload without restart (handy during ops)."""
-    global _model, _titles_lower
-    try:
-        _download_model()
-        _model = _load_model_from_disk()
-        _titles_lower = None
-        return {"status": "reloaded", "model_key": S3_KEY}
-    except Exception as e:
-        _model = None
-        _titles_lower = None
-        raise HTTPException(status_code=500, detail=f"failed to reload model: {e}")
+    return {"status": "ok", "model_key": S3_KEY, "etag": _model_etag}
 
 
 @app.get("/recommend", response_model=RecommendResponse)

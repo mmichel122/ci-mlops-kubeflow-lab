@@ -37,7 +37,7 @@ spec:
             - name: MODEL_S3_BUCKET
               value: "mlops-anime-data"
             - name: MODEL_S3_KEY
-              value: "models/anime_recommender/model.joblib"
+              value: "models/anime_recommender/approved/model.joblib"
             - name: MODEL_LOCAL_PATH
               value: "/tmp/model/model.joblib"
             - name: DEFAULT_K
