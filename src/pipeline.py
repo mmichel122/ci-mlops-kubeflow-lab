@@ -1,6 +1,6 @@
 import os
-from typing import Annotated
 from kfp import dsl
+from kfp.dsl import Input, Output, Metrics
 
 
 def _training_image() -> str:
@@ -17,7 +17,7 @@ def train_recommender(
     model_key: str,
     max_features: int,
     ngram_max: int,
-    metrics_path: Annotated[str, dsl.OutputPath()],
+    train_metrics: Output[Metrics],   # <-- KFP artifact
 ):
     return dsl.ContainerSpec(
         image=_training_image(),
@@ -28,7 +28,7 @@ def train_recommender(
             "--model_key", model_key,
             "--max_features", str(max_features),
             "--ngram_max", str(ngram_max),
-            "--metrics_path", metrics_path,
+            "--metrics_path", train_metrics.path,  # <-- pass file path
         ],
     )
 
@@ -38,7 +38,7 @@ def evaluate_recommender(
     bucket_name: str,
     model_key: str,
     min_mean_similarity: float,
-    metrics_path: Annotated[str, dsl.OutputPath()],
+    eval_metrics: Output[Metrics],    # <-- KFP artifact
 ):
     return dsl.ContainerSpec(
         image=_training_image(),
@@ -47,7 +47,7 @@ def evaluate_recommender(
             "--bucket_name", bucket_name,
             "--model_key", model_key,
             "--min_mean_similarity", str(min_mean_similarity),
-            "--metrics_path", metrics_path,
+            "--metrics_path", eval_metrics.path,   # <-- pass file path
         ],
     )
 
@@ -56,7 +56,7 @@ def evaluate_recommender(
 def promote_model(
     bucket_name: str,
     challenger_model_key: str,
-    eval_metrics_path: Annotated[str, dsl.InputPath()],
+    eval_metrics: Input[Metrics],     # <-- KFP artifact
     approved_model_key: str,
     approved_meta_key: str,
     margin: float,
@@ -67,7 +67,7 @@ def promote_model(
         args=[
             "--bucket_name", bucket_name,
             "--challenger_model_key", challenger_model_key,
-            "--eval_metrics_path", eval_metrics_path,
+            "--eval_metrics_path", eval_metrics.path,  # <-- read metrics file
             "--approved_model_key", approved_model_key,
             "--approved_meta_key", approved_meta_key,
             "--margin", str(margin),
@@ -94,7 +94,10 @@ def pipeline(
     max_features: int = 50000,
     ngram_max: int = 2,
 
+    # evaluation gate
     min_mean_similarity: float = 0.15,
+
+    # promotion rule
     promotion_margin: float = 0.005,
 ):
     train_task = train_recommender(
@@ -118,7 +121,7 @@ def pipeline(
     promote_task = promote_model(
         bucket_name=bucket_name,
         challenger_model_key=model_key,
-        eval_metrics_path=eval_task.outputs["metrics_path"],
+        eval_metrics=eval_task.outputs["eval_metrics"],
         approved_model_key=approved_model_key,
         approved_meta_key=approved_meta_key,
         margin=promotion_margin,
