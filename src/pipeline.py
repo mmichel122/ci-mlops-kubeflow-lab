@@ -1,4 +1,5 @@
 import os
+from typing import Annotated
 from kfp import dsl
 
 
@@ -16,7 +17,7 @@ def train_recommender(
     model_key: str,
     max_features: int,
     ngram_max: int,
-    metrics_path: dsl.OutputPath(str),
+    metrics_path: Annotated[str, dsl.OutputPath()],
 ):
     return dsl.ContainerSpec(
         image=_training_image(),
@@ -37,7 +38,7 @@ def evaluate_recommender(
     bucket_name: str,
     model_key: str,
     min_mean_similarity: float,
-    metrics_path: dsl.OutputPath(str),
+    metrics_path: Annotated[str, dsl.OutputPath()],
 ):
     return dsl.ContainerSpec(
         image=_training_image(),
@@ -55,7 +56,7 @@ def evaluate_recommender(
 def promote_model(
     bucket_name: str,
     challenger_model_key: str,
-    eval_metrics_path: dsl.InputPath(str),
+    eval_metrics_path: Annotated[str, dsl.InputPath()],
     approved_model_key: str,
     approved_meta_key: str,
     margin: float,
@@ -83,21 +84,17 @@ def pipeline(
     bucket_name: str = "mlops-anime-data",
     data_key: str = "cleaned_anime_data.csv",
 
-    # challenger model output (should be unique per run)
+    # challenger output (unique per run)
     model_key: str = "models/anime_recommender/runs/manual/model.joblib",
 
-    # stable champion pointers for serving
+    # stable champion pointers
     approved_model_key: str = "models/anime_recommender/approved/model.joblib",
     approved_meta_key: str = "models/anime_recommender/approved/metadata.json",
 
-    # training config
     max_features: int = 50000,
     ngram_max: int = 2,
 
-    # evaluation gate
     min_mean_similarity: float = 0.15,
-
-    # promotion rule
     promotion_margin: float = 0.005,
 ):
     train_task = train_recommender(
