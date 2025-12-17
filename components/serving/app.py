@@ -1,3 +1,4 @@
+import math
 import os
 from typing import Any, Dict, List, Optional
 
@@ -16,15 +17,20 @@ S3_KEY = os.getenv("MODEL_S3_KEY", "models/anime_recommender/approved/model.jobl
 DEFAULT_K = int(os.getenv("DEFAULT_K", "10"))
 MAX_K = int(os.getenv("MAX_K", "50"))
 
-app = FastAPI(title="AnimeOps Recommender", version="0.2.0")
+app = FastAPI(title="AnimeOps Recommender", version="0.2.1")
 
 _model: Optional[Dict[str, Any]] = None
 _titles_lower: Optional[List[str]] = None
 _model_etag: Optional[str] = None
 
+_s3_client_cached = None
+
 
 def _s3_client():
-    return boto3.client("s3")
+    global _s3_client_cached
+    if _s3_client_cached is None:
+        _s3_client_cached = boto3.client("s3")
+    return _s3_client_cached
 
 
 def _download_model() -> str:
@@ -36,10 +42,8 @@ def _download_model() -> str:
     return etag
 
 
-
 def _load_model_from_disk() -> Dict[str, Any]:
     artifact = joblib.load(MODEL_LOCAL_PATH)
-    # Minimal validation
     for k in ("titles", "vectorizer", "tfidf_matrix"):
         if k not in artifact:
             raise ValueError(f"Model artifact missing key: {k}")
@@ -55,11 +59,9 @@ def _find_title_index(query: str, titles_lower: List[str]) -> int:
     if not q:
         raise ValueError("title is empty")
 
-    # exact match
     if q in titles_lower:
         return titles_lower.index(q)
 
-    # contains match (simple fallback)
     for i, t in enumerate(titles_lower):
         if q in t:
             return i
@@ -67,20 +69,32 @@ def _find_title_index(query: str, titles_lower: List[str]) -> int:
     raise ValueError(f"Unknown title: {query}")
 
 
+def _is_nan(v: Any) -> bool:
+    if isinstance(v, (np.generic,)):
+        v = v.item()
+    return isinstance(v, float) and math.isnan(v)
+
+
 def _get_meta_row(meta: Dict[str, List[Any]], idx: int) -> Dict[str, Any]:
     if not meta:
         return {}
+
     out: Dict[str, Any] = {}
-    # choose a small set of useful fields if present
     wanted = ["Score", "Popularity", "Rank", "Type", "Episodes", "Studios", "Genres"]
+
     for col in wanted:
-        if col in meta and idx < len(meta[col]):
-            val = meta[col][idx]
-            # convert numpy scalars nicely
-            if isinstance(val, (np.generic,)):
-                val = val.item()
-            if val is not None and str(val) != "nan":
-                out[col.lower()] = val
+        if col not in meta or idx >= len(meta[col]):
+            continue
+
+        val = meta[col][idx]
+        if isinstance(val, (np.generic,)):
+            val = val.item()
+
+        if val is None or _is_nan(val):
+            continue
+
+        out[col.lower()] = val
+
     return out
 
 
@@ -95,9 +109,8 @@ def recommend_from_artifact(artifact: Dict[str, Any], title: str, k: int) -> Lis
 
     idx = _find_title_index(title, _titles_lower)
 
-    # cosine sim between one vector and all items (efficient, no NxN)
     sims = cosine_similarity(X[idx], X).ravel()
-    sims[idx] = -1.0  # exclude itself
+    sims[idx] = -1.0
 
     k = min(k, len(titles) - 1) if len(titles) > 1 else 0
     if k <= 0:
@@ -111,39 +124,29 @@ def recommend_from_artifact(artifact: Dict[str, Any], title: str, k: int) -> Lis
         rec = {"title": titles[j], "similarity": float(sims[j])}
         rec.update(_get_meta_row(meta, j))
         recs.append(rec)
+
     return recs
+
+
+def _load_model() -> None:
+    global _model, _titles_lower, _model_etag
+    etag = _download_model()
+    _model = _load_model_from_disk()
+    _model_etag = etag
+    _titles_lower = None
+    print(f"Loaded model s3://{S3_BUCKET}/{S3_KEY} etag={etag}")
 
 
 @app.on_event("startup")
 def startup_load():
     global _model, _titles_lower, _model_etag
     try:
-        etag = _download_model()
-        _model = _load_model_from_disk()
-        _model_etag = etag
-        _titles_lower = None
+        _load_model()
     except Exception as e:
         _model = None
         _titles_lower = None
         _model_etag = None
         print(f"Failed to load model: {e}")
-
-
-@app.post("/reload")
-def reload_model():
-    """Manual reload without restart (handy during ops)."""
-    global _model, _titles_lower, _model_etag
-    try:
-        etag = _download_model()
-        _model = _load_model_from_disk()
-        _model_etag = etag
-        _titles_lower = None
-        return {"status": "reloaded", "model_key": S3_KEY, "etag": _model_etag}
-    except Exception as e:
-        _model = None
-        _titles_lower = None
-        _model_etag = None
-        raise HTTPException(status_code=500, detail=f"failed to reload model: {e}")
 
 
 class RecommendResponse(BaseModel):
@@ -157,6 +160,19 @@ def healthz():
     if _model is None:
         raise HTTPException(status_code=503, detail="model not loaded")
     return {"status": "ok", "model_key": S3_KEY, "etag": _model_etag}
+
+
+@app.post("/reload")
+def reload_model():
+    global _model, _titles_lower, _model_etag
+    try:
+        _load_model()
+        return {"status": "reloaded", "model_key": S3_KEY, "etag": _model_etag}
+    except Exception as e:
+        _model = None
+        _titles_lower = None
+        _model_etag = None
+        raise HTTPException(status_code=500, detail=f"failed to reload model: {e}")
 
 
 @app.get("/recommend", response_model=RecommendResponse)
