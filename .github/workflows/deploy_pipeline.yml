@@ -17,16 +17,59 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-and-deploy:
+  # -------------------------
+  # Detect what changed
+  # -------------------------
+  changes:
     runs-on: self-hosted
+    outputs:
+      training: ${{ steps.filter.outputs.training }}
+      serving: ${{ steps.filter.outputs.serving }}
+      pipeline: ${{ steps.filter.outputs.pipeline }}
+      k8s: ${{ steps.filter.outputs.k8s }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
+      - name: Detect changed paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            # Training image inputs
+            training:
+              - "components/training/**"
+              - "requirements.txt"
+              - "src/training/**"
+              - "scripts/**"
+
+            # Serving image inputs
+            serving:
+              - "components/serving/**"
+              - "requirements.txt"
+              - "src/serving/**"
+
+            # Pipeline deploy/run inputs (compile+deploy+optionally run)
+            pipeline:
+              - "components/training/**"
+              - "requirements.txt"
+              - "src/training/**"
+              - "scripts/**"
+              - ".github/workflows/**"
+
+            # K8s manifests (serving deploy manifests, namespace, svc, etc.)
+            k8s:
+              - "k8s/**"
+
+  # -------------------------
+  # Build & push SERVING image
+  # -------------------------
+  build-serving:
+    needs: [changes]
+    if: needs.changes.outputs.serving == 'true'
+    runs-on: self-hosted
     env:
       DOCKERHUB_REPO_APP: mmdocker06/anime-ops-app
-      DOCKERHUB_REPO_TRAIN: mmdocker06/anime-ops-training
-
-      # KFP API endpoint (NOT the UI)
-      KFP_HOST: http://10.200.1.76:30081
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -40,7 +83,6 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # ---------- Build & push SERVING image ----------
       - name: Build and push serving image
         uses: docker/build-push-action@v6
         with:
@@ -53,7 +95,28 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # ---------- Build & push TRAINING image ----------
+  # -------------------------
+  # Build & push TRAINING image
+  # -------------------------
+  build-training:
+    needs: [changes]
+    if: needs.changes.outputs.training == 'true'
+    runs-on: self-hosted
+    env:
+      DOCKERHUB_REPO_TRAIN: mmdocker06/anime-ops-training
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Build and push training image
         uses: docker/build-push-action@v6
         with:
@@ -66,7 +129,22 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # ---------- Kubeflow pipeline ----------
+  # -------------------------
+  # Kubeflow pipeline: compile + deploy (+ optionally run)
+  # Only runs when pipeline-related files changed
+  # -------------------------
+  deploy-pipeline:
+    needs: [changes, build-training, build-serving]
+    if: needs.changes.outputs.pipeline == 'true'
+    runs-on: self-hosted
+    env:
+      DOCKERHUB_REPO_APP: mmdocker06/anime-ops-app
+      DOCKERHUB_REPO_TRAIN: mmdocker06/anime-ops-training
+      KFP_HOST: http://10.200.1.76:30081
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -85,25 +163,38 @@ jobs:
       - name: Compile & deploy pipeline
         env:
           TRAINING_IMAGE: ${{ env.DOCKERHUB_REPO_TRAIN }}:${{ github.sha }}
-          SERVING_IMAGE:  ${{ env.DOCKERHUB_REPO_APP }}:${{ github.sha }}
+          SERVING_IMAGE: ${{ env.DOCKERHUB_REPO_APP }}:${{ github.sha }}
           CREATE_RUN: "1"
         run: |
           export KUBEFLOW_HOST="${KFP_HOST}"
           export PYTHONPATH="${GITHUB_WORKSPACE}"
           python scripts/deploy.py
 
-      # ---------- Deploy serving app to Kubernetes ----------
-      - name: Deploy AnimeOps serving app
+  # -------------------------
+  # Deploy serving app manifests + (optionally) pin image
+  # - applies k8s manifests if k8s changed OR serving changed
+  # - pins image only if serving image was rebuilt
+  # -------------------------
+  deploy-serving:
+    needs: [changes, build-serving]
+    if: needs.changes.outputs.k8s == 'true' || needs.changes.outputs.serving == 'true'
+    runs-on: self-hosted
+    env:
+      DOCKERHUB_REPO_APP: mmdocker06/anime-ops-app
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Apply manifests + rollout
         run: |
           echo "Deploying serving app to k3s…"
 
-          # Apply manifests (namespace, deployment, service)
           sudo kubectl apply -f k8s/manifest.yaml
 
-          # Pin the serving image to this commit SHA
-          sudo kubectl -n animeops-serving set image \
-            deploy/animeops-serving \
-            api=${{ env.DOCKERHUB_REPO_APP }}:${{ github.sha }}
+          if [ "${{ needs.changes.outputs.serving }}" = "true" ]; then
+            sudo kubectl -n animeops-serving set image \
+              deploy/animeops-serving \
+              api=${{ env.DOCKERHUB_REPO_APP }}:${{ github.sha }}
+          fi
 
-          # Ensure rollout happens
           sudo kubectl -n animeops-serving rollout status deploy/animeops-serving
