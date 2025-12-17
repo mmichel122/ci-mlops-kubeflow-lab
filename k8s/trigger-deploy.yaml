@@ -1,0 +1,258 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: argo-events
+---
+apiVersion: argoproj.io/v1alpha1
+kind: EventSource
+metadata:
+  name: sqs-webhook-source
+  namespace: argo-events
+spec:
+  service:
+    ports:
+      - port: 12000
+        targetPort: 12000
+  webhook:
+    s3csv:
+      port: "12000"
+      endpoint: /s3csv
+      method: POST
+      jsonBody: true
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Sensor
+metadata:
+  name: s3-kfp-sensor
+  namespace: argo-events
+spec:
+  template:
+    serviceAccountName: argo-events-sa
+  dependencies:
+    - name: webhook-dep
+      eventSourceName: sqs-webhook-source
+      eventName: s3csv
+  triggers:
+    - template:
+        name: kfp-trigger
+        k8s:
+          operation: create
+          source:
+            resource:
+              apiVersion: batch/v1
+              kind: Job
+              metadata:
+                generateName: trigger-pipeline-
+                namespace: kubeflow
+              spec:
+                backoffLimit: 2
+                template:
+                  spec:
+                    restartPolicy: Never
+                    containers:
+                      - name: trigger
+                        image: python:3.11-slim
+                        command: ["/bin/sh", "-lc"]
+                        env:
+                          - name: EVENT_DATA
+                            value: "placeholder"
+                          - name: KFP_HOST
+                            value: "http://ml-pipeline.kubeflow.svc.cluster.local:8888"
+                          - name: KFP_PIPELINE_ID
+                            value: "316fb075-2457-436a-9ada-fc723c9b827d"
+                          - name: KFP_EXPERIMENT_NAME
+                            value: "S3-Event-Triggered"
+                          - name: ALLOW_BUCKET
+                            value: "mlops-anime-data"
+                          - name: ALLOW_SUFFIX
+                            value: ".csv"
+                        args:
+                          - |
+                            pip install --no-cache-dir kfp==2.7.0 && python - <<'PY'
+                            import json, os, sys, time
+                            from urllib.parse import unquote_plus
+                            import kfp
+
+                            raw = os.environ.get("EVENT_DATA","{}")
+                            evt = json.loads(raw)
+
+                            if "Records" in evt:
+                                s3_event = evt
+                            elif "Message" in evt:
+                                s3_event = json.loads(evt["Message"])
+                            else:
+                                print("Skip: unknown event format keys=", list(evt.keys()))
+                                sys.exit(0)
+
+                            recs = s3_event.get("Records", [])
+                            if not recs:
+                                print("Skip: no Records")
+                                sys.exit(0)
+
+                            bucket = recs[0]["s3"]["bucket"]["name"]
+                            key = unquote_plus(recs[0]["s3"]["object"]["key"])
+
+                            allow_bucket = os.getenv("ALLOW_BUCKET","")
+                            allow_suffix = os.getenv("ALLOW_SUFFIX","")
+                            allow_key_exact = os.getenv("ALLOW_KEY_EXACT","")
+
+                            if allow_bucket and bucket != allow_bucket:
+                                sys.exit(0)
+                            if allow_suffix and not key.endswith(allow_suffix):
+                                sys.exit(0)
+                            if allow_key_exact and key != allow_key_exact:
+                                sys.exit(0)
+
+                            client = kfp.Client(host=os.environ["KFP_HOST"])
+
+                            exp_name = os.getenv("KFP_EXPERIMENT_NAME","S3-Event-Triggered")
+                            try:
+                                exp = client.get_experiment(experiment_name=exp_name)
+                            except Exception:
+                                exp = client.create_experiment(name=exp_name)
+
+                            params = {
+                                "bucket_name": bucket,
+                                "data_key": key,
+                                "model_key": f"models/anime_recommender/runs/s3/{int(time.time())}/model.joblib",
+                            }
+
+                            run = client.run_pipeline(
+                                experiment_id=exp.experiment_id,
+                                job_name=f"Auto-Run-{int(time.time())}",
+                                pipeline_id=os.environ["KFP_PIPELINE_ID"],
+                                params=params,
+                            )
+                            print("Triggered run_id:", run.run_id)
+                            PY
+          parameters:
+            - src:
+                dependencyName: webhook-dep
+                dataKey: body
+              dest: spec.template.spec.containers.0.env.0.value
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: argo-events-sa
+  namespace: argo-events
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sensor-basic
+  namespace: argo-events
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["sensors", "eventsources"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sensor-basic-binding
+  namespace: argo-events
+subjects:
+  - kind: ServiceAccount
+    name: argo-events-sa
+    namespace: argo-events
+roleRef:
+  kind: Role
+  name: sensor-basic
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: allow-job-create
+  namespace: kubeflow
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: allow-job-create-binding
+  namespace: kubeflow
+subjects:
+  - kind: ServiceAccount
+    name: argo-events-sa
+    namespace: argo-events
+roleRef:
+  kind: Role
+  name: allow-job-create
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sqs-poller-code
+  namespace: argo-events
+data:
+  poller.py: |
+    import json, os, requests
+    import boto3
+
+    REGION = os.getenv("AWS_REGION", "eu-west-3")
+    QUEUE_URL = os.environ["SQS_QUEUE_URL"]
+    WEBHOOK_URL = os.environ["WEBHOOK_URL"]
+
+    sqs = boto3.client("sqs", region_name=REGION)
+
+    while True:
+      resp = sqs.receive_message(
+        QueueUrl=QUEUE_URL,
+        MaxNumberOfMessages=10,
+        WaitTimeSeconds=20,
+        VisibilityTimeout=300,
+      )
+      for m in resp.get("Messages", []):
+        rh = m["ReceiptHandle"]
+        body = json.loads(m["Body"])
+
+        if body.get("Event") == "s3:TestEvent":
+          sqs.delete_message(QueueUrl=QUEUE_URL, ReceiptHandle=rh)
+          continue
+
+        r = requests.post(WEBHOOK_URL, json=body, timeout=10)
+        r.raise_for_status()
+
+        sqs.delete_message(QueueUrl=QUEUE_URL, ReceiptHandle=rh)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sqs-poller
+  namespace: argo-events
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sqs-poller
+  template:
+    metadata:
+      labels:
+        app: sqs-poller
+    spec:
+      containers:
+        - name: poller
+          image: python:3.11-slim
+          command: ["/bin/sh","-lc"]
+          args:
+            - pip install --no-cache-dir boto3 requests && python /app/poller.py
+          env:
+            - name: AWS_REGION
+              value: eu-west-3
+            - name: SQS_QUEUE_URL
+              value: "https://sqs.eu-west-3.amazonaws.com/548894310305/kubeflow-pipeline-trigger-queue"
+            - name: WEBHOOK_URL
+              value: "http://sqs-webhook-source-eventsource-svc.argo-events.svc.cluster.local:12000/s3csv"
+          volumeMounts:
+            - name: code
+              mountPath: /app
+      volumes:
+        - name: code
+          configMap:
+            name: sqs-poller-code
