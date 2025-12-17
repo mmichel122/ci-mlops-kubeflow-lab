@@ -11,6 +11,7 @@ on:
       - "requirements.txt"
       - ".github/workflows/**"
       - "k8s/**"
+      - "ui/**"
 
 concurrency:
   group: animeops-main
@@ -24,9 +25,10 @@ jobs:
     runs-on: self-hosted
     outputs:
       training: ${{ steps.filter.outputs.training }}
-      serving: ${{ steps.filter.outputs.serving }}
+      serving:  ${{ steps.filter.outputs.serving }}
       pipeline: ${{ steps.filter.outputs.pipeline }}
-      k8s: ${{ steps.filter.outputs.k8s }}
+      k8s:      ${{ steps.filter.outputs.k8s }}
+      ui:       ${{ steps.filter.outputs.ui }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -36,20 +38,17 @@ jobs:
         uses: dorny/paths-filter@v3
         with:
           filters: |
-            # Training image inputs
             training:
               - "components/training/**"
               - "requirements.txt"
               - "src/training/**"
               - "scripts/**"
 
-            # Serving image inputs
             serving:
               - "components/serving/**"
               - "requirements.txt"
               - "src/serving/**"
 
-            # Pipeline deploy/run inputs (compile+deploy+optionally run)
             pipeline:
               - "components/training/**"
               - "requirements.txt"
@@ -57,9 +56,42 @@ jobs:
               - "scripts/**"
               - ".github/workflows/**"
 
-            # K8s manifests (serving deploy manifests, namespace, svc, etc.)
             k8s:
               - "k8s/**"
+              - "components/serving/**"
+
+            ui:
+              - "ui/**"
+
+  # -------------------------
+  # Upload UI to S3 (static site assets)
+  # Runs only when ui/** changes
+  # -------------------------
+  upload-ui:
+    needs: [changes]
+    if: needs.changes.outputs.ui == 'true'
+    runs-on: self-hosted
+    env:
+      AWS_REGION: eu-west-3
+      AWS_DEFAULT_REGION: eu-west-3
+      UI_S3_BUCKET: mlops-anime-data
+      UI_S3_PREFIX: ui/animeops/
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Upload UI folder to S3
+        run: |
+          set -euo pipefail
+          aws s3 sync ./ui "s3://${UI_S3_BUCKET}/${UI_S3_PREFIX}" --delete
+          aws s3 ls "s3://${UI_S3_BUCKET}/${UI_S3_PREFIX}"
 
   # -------------------------
   # Build & push SERVING image
@@ -131,7 +163,6 @@ jobs:
 
   # -------------------------
   # Kubeflow pipeline: compile + deploy (+ optionally run)
-  # Only runs when pipeline-related files changed
   # -------------------------
   deploy-pipeline:
     needs: [changes, build-training, build-serving]
@@ -171,9 +202,7 @@ jobs:
           python scripts/deploy.py
 
   # -------------------------
-  # Deploy serving app manifests + (optionally) pin image
-  # - applies k8s manifests if k8s changed OR serving changed
-  # - pins image only if serving image was rebuilt
+  # Deploy serving app manifests + pin image (if rebuilt)
   # -------------------------
   deploy-serving:
     needs: [changes, build-serving]
@@ -187,6 +216,7 @@ jobs:
 
       - name: Apply manifests + rollout
         run: |
+          set -euo pipefail
           echo "Deploying serving app to k3s…"
 
           sudo kubectl apply -f k8s/manifest.yaml

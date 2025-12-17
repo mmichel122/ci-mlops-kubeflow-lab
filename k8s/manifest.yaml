@@ -3,6 +3,34 @@ kind: Namespace
 metadata:
   name: animeops-serving
 ---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: animeops-nginx-conf
+  namespace: animeops-serving
+data:
+  default.conf: |
+    server {
+      listen 80;
+      server_name _;
+
+      root /usr/share/nginx/html;
+      index index.html;
+
+      location / {
+        try_files $uri $uri/ /index.html;
+      }
+
+      location /api/ {
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+
+        rewrite ^/api/(.*)$ /$1 break;
+        proxy_pass http://127.0.0.1:8080;
+      }
+    }
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -19,21 +47,57 @@ spec:
         app: animeops-serving
     spec:
       terminationGracePeriodSeconds: 10
+
+      volumes:
+        - name: ui-content
+          emptyDir: {}
+        - name: nginx-conf
+          configMap:
+            name: animeops-nginx-conf
+
+      initContainers:
+        - name: sync-ui-from-s3
+          image: amazon/aws-cli:2.15.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: AWS_REGION
+              value: "eu-west-3"
+            - name: AWS_DEFAULT_REGION
+              value: "eu-west-3"
+            - name: UI_S3_BUCKET
+              value: "mlops-anime-data"
+            - name: UI_S3_PREFIX
+              value: "ui/animeops/"
+          command: ["/bin/sh", "-c"]
+          args:
+            - >
+              set -euo pipefail;
+              aws s3 sync "s3://${UI_S3_BUCKET}/${UI_S3_PREFIX}" /ui --delete;
+              test -f /ui/index.html;
+              ls -la /ui
+          volumeMounts:
+            - name: ui-content
+              mountPath: /ui
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              cpu: "250m"
+              memory: "256Mi"
+
       containers:
         - name: api
           image: mmdocker06/anime-ops-app:latest
           imagePullPolicy: Always
           ports:
-            - name: http
+            - name: http-api
               containerPort: 8080
-
           env:
-            # Ensure boto3 uses the correct region
             - name: AWS_REGION
               value: "eu-west-3"
             - name: AWS_DEFAULT_REGION
               value: "eu-west-3"
-
             - name: MODEL_S3_BUCKET
               value: "mlops-anime-data"
             - name: MODEL_S3_KEY
@@ -44,7 +108,6 @@ spec:
               value: "10"
             - name: MAX_K
               value: "50"
-
           resources:
             requests:
               cpu: "250m"
@@ -52,7 +115,6 @@ spec:
             limits:
               cpu: "1"
               memory: "1Gi"
-
           readinessProbe:
             httpGet:
               path: /healthz
@@ -61,12 +123,48 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 3
             failureThreshold: 6
-
           livenessProbe:
             httpGet:
               path: /healthz
               port: 8080
             initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 6
+
+        - name: web
+          image: nginx:1.27-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http-web
+              containerPort: 80
+          volumeMounts:
+            - name: ui-content
+              mountPath: /usr/share/nginx/html
+              readOnly: true
+            - name: nginx-conf
+              mountPath: /etc/nginx/conf.d
+              readOnly: true
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "250m"
+              memory: "256Mi"
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 20
             periodSeconds: 20
             timeoutSeconds: 3
             failureThreshold: 6
@@ -83,5 +181,5 @@ spec:
   ports:
     - name: http
       port: 80
-      targetPort: 8080
+      targetPort: 80
       nodePort: 30082

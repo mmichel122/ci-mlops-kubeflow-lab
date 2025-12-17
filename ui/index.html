@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AnimeOps Recommender</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+  </head>
+  <body class="min-h-screen bg-slate-950 text-slate-100">
+    <div class="mx-auto max-w-5xl px-4 py-10">
+      <div class="flex items-center justify-between gap-4">
+        <div>
+          <h1 class="text-3xl font-semibold tracking-tight">AnimeOps</h1>
+          <p class="mt-1 text-slate-300">Type a title, get similar anime from your approved model.</p>
+        </div>
+        <div class="rounded-2xl bg-slate-900 px-4 py-2 text-sm text-slate-300 shadow">
+          <span id="healthBadge">Checking API…</span>
+        </div>
+      </div>
+
+      <div class="mt-8 grid gap-4 rounded-2xl bg-slate-900/60 p-5 shadow">
+        <div class="grid gap-3 md:grid-cols-3">
+          <div class="md:col-span-2">
+            <label class="text-sm text-slate-300">Title</label>
+            <input id="titleInput" list="titleSuggestions"
+              class="mt-1 w-full rounded-xl border border-slate-800 bg-slate-950 px-4 py-3 outline-none focus:ring-2 focus:ring-slate-600"
+              placeholder="e.g., Naruto Shippuden" />
+            <datalist id="titleSuggestions"></datalist>
+          </div>
+
+          <div>
+            <label class="text-sm text-slate-300">Top K</label>
+            <div class="mt-1 flex items-center gap-3">
+              <input id="kInput" type="range" min="1" max="50" value="10" class="w-full" />
+              <span id="kValue" class="w-12 text-right text-slate-200">10</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-3">
+          <button id="goBtn"
+            class="rounded-xl bg-indigo-500 px-4 py-2.5 font-medium text-white hover:bg-indigo-400 disabled:opacity-50">
+            Recommend
+          </button>
+          <button id="clearBtn"
+            class="rounded-xl border border-slate-800 bg-slate-950 px-4 py-2.5 text-slate-200 hover:bg-slate-900">
+            Clear
+          </button>
+          <div id="status" class="text-sm text-slate-300"></div>
+        </div>
+      </div>
+
+      <div class="mt-6 rounded-2xl bg-slate-900/60 p-5 shadow">
+        <h2 class="text-lg font-semibold">Results</h2>
+        <div id="error" class="mt-3 hidden rounded-xl border border-rose-900 bg-rose-950/40 p-3 text-rose-200"></div>
+
+        <div class="mt-4 overflow-x-auto">
+          <table class="w-full text-left text-sm">
+            <thead class="text-slate-300">
+              <tr class="border-b border-slate-800">
+                <th class="py-2 pr-3">Title</th>
+                <th class="py-2 pr-3">Similarity</th>
+                <th class="py-2 pr-3">Score</th>
+                <th class="py-2 pr-3">Rank</th>
+                <th class="py-2 pr-3">Popularity</th>
+                <th class="py-2 pr-3">Type</th>
+                <th class="py-2 pr-3">Episodes</th>
+                <th class="py-2 pr-3">Studios</th>
+                <th class="py-2 pr-3">Genres</th>
+              </tr>
+            </thead>
+            <tbody id="rows" class="text-slate-100"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <p class="mt-8 text-xs text-slate-500">
+        UI served by nginx, model served by FastAPI inside the same pod. API is proxied under <code>/api</code>.
+      </p>
+    </div>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+
+      const api = {
+        health: () => fetch("/api/healthz"),
+        titles: (q) => fetch(`/api/titles?q=${encodeURIComponent(q)}&limit=20`),
+        recommend: (title, k) =>
+          fetch(`/api/recommend?title=${encodeURIComponent(title)}&k=${encodeURIComponent(k)}`),
+      };
+
+      function setError(msg) {
+        const el = $("error");
+        if (!msg) { el.classList.add("hidden"); el.textContent = ""; return; }
+        el.classList.remove("hidden");
+        el.textContent = msg;
+      }
+
+      function setStatus(msg) { $("status").textContent = msg || ""; }
+
+      function renderRows(recs) {
+        const rows = $("rows");
+        rows.innerHTML = "";
+        for (const r of recs) {
+          const tr = document.createElement("tr");
+          tr.className = "border-b border-slate-800/70";
+          tr.innerHTML = `
+            <td class="py-2 pr-3 font-medium">${r.title ?? ""}</td>
+            <td class="py-2 pr-3">${(r.similarity ?? 0).toFixed(4)}</td>
+            <td class="py-2 pr-3">${r.score ?? ""}</td>
+            <td class="py-2 pr-3">${r.rank ?? ""}</td>
+            <td class="py-2 pr-3">${r.popularity ?? ""}</td>
+            <td class="py-2 pr-3">${r.type ?? ""}</td>
+            <td class="py-2 pr-3">${r.episodes ?? ""}</td>
+            <td class="py-2 pr-3">${r.studios ?? ""}</td>
+            <td class="py-2 pr-3">${r.genres ?? ""}</td>
+          `;
+          rows.appendChild(tr);
+        }
+      }
+
+      async function refreshHealth() {
+        try {
+          const res = await api.health();
+          if (!res.ok) throw new Error(`healthz ${res.status}`);
+          const body = await res.json();
+          $("healthBadge").textContent = `API OK (etag ${body.etag ?? "?"})`;
+        } catch (e) {
+          $("healthBadge").textContent = `API unavailable`;
+        }
+      }
+
+      let titlesTimer = null;
+      async function updateSuggestions(q) {
+        try {
+          const res = await api.titles(q);
+          if (!res.ok) return;
+          const body = await res.json();
+          const dl = $("titleSuggestions");
+          dl.innerHTML = "";
+          for (const t of (body.results || [])) {
+            const opt = document.createElement("option");
+            opt.value = t;
+            dl.appendChild(opt);
+          }
+        } catch {}
+      }
+
+      $("kInput").addEventListener("input", () => {
+        $("kValue").textContent = $("kInput").value;
+      });
+
+      $("titleInput").addEventListener("input", () => {
+        const q = $("titleInput").value.trim();
+        clearTimeout(titlesTimer);
+        titlesTimer = setTimeout(() => updateSuggestions(q), 200);
+      });
+
+      $("goBtn").addEventListener("click", async () => {
+        setError("");
+        const title = $("titleInput").value.trim();
+        const k = parseInt($("kInput").value, 10);
+
+        if (!title) { setError("Enter a title."); return; }
+
+        $("goBtn").disabled = true;
+        setStatus("Loading recommendations…");
+
+        try {
+          const res = await api.recommend(title, k);
+          const body = await res.json();
+
+          if (!res.ok) {
+            setError(body?.detail || `Request failed (${res.status})`);
+            renderRows([]);
+            return;
+          }
+          renderRows(body.recommendations || []);
+          setStatus(`Showing top ${body.k} for "${body.query}".`);
+        } catch (e) {
+          setError("Network error calling API.");
+          renderRows([]);
+        } finally {
+          $("goBtn").disabled = false;
+        }
+      });
+
+      $("clearBtn").addEventListener("click", () => {
+        $("titleInput").value = "";
+        setError("");
+        setStatus("");
+        renderRows([]);
+      });
+
+      refreshHealth();
+      setInterval(refreshHealth, 15000);
+    </script>
+  </body>
+</html>
