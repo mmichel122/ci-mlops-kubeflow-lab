@@ -1,6 +1,5 @@
 import argparse
 import json
-import os
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
@@ -46,23 +45,11 @@ def _get_metric(d: Dict[str, Any], name: str) -> Optional[float]:
     v = d.get(name)
     if isinstance(v, (int, float)):
         return float(v)
-    for path in (("eval", name), ("metrics", name), ("challenger", "metrics", name)):
-        cur: Any = d
-        ok = True
-        for p in path:
-            if isinstance(cur, dict) and p in cur:
-                cur = cur[p]
-            else:
-                ok = False
-                break
-        if ok and isinstance(cur, (int, float)):
-            return float(cur)
     return None
 
 
 def main():
     ap = argparse.ArgumentParser()
-
     ap.add_argument("--bucket_name", required=True)
 
     ap.add_argument("--challenger_model_key", required=True)
@@ -74,12 +61,11 @@ def main():
     ap.add_argument("--metric_name", default="avg_genre_jaccard_at_10")
     ap.add_argument("--margin", type=float, default=0.0)
 
-    ap.add_argument("--run_id", default=os.getenv("RUN_ID", "unknown"))
-    ap.add_argument("--git_sha", default=os.getenv("GITHUB_SHA", "manual"))
-    ap.add_argument("--aws_region", default=os.getenv("AWS_REGION", ""))
+    ap.add_argument("--run_id", default="unknown")
+    ap.add_argument("--git_sha", default="manual")
+    ap.add_argument("--aws_region", default="")
 
     args = ap.parse_args()
-
     s3 = s3_client(args.aws_region or None)
 
     with open(args.eval_metrics_path, "r", encoding="utf-8") as f:
@@ -90,10 +76,21 @@ def main():
         raise RuntimeError(f"Missing metric '{args.metric_name}' in {args.eval_metrics_path}")
 
     approved_meta = s3_read_json(s3, args.bucket_name, args.approved_meta_key) or {}
-    champion_val = _get_metric(approved_meta, args.metric_name)
+    champion_eval = approved_meta.get("eval") if isinstance(approved_meta.get("eval"), dict) else None
+    champion_val = _get_metric(champion_eval, args.metric_name) if champion_eval else None
+
+    updated_at = datetime.now(timezone.utc).isoformat()
+
+    if champion_val is None:
+        should_promote = True
+        reason = "no_existing_champion"
+    else:
+        required = champion_val * (1.0 + float(args.margin))
+        should_promote = challenger_val >= required
+        reason = "meets_margin" if should_promote else "below_margin"
 
     decision: Dict[str, Any] = {
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": updated_at,
         "metric_name": args.metric_name,
         "margin": float(args.margin),
         "challenger": {
@@ -107,17 +104,20 @@ def main():
             "model_key": args.approved_model_key,
             "value": float(champion_val) if champion_val is not None else None,
         },
+        "promotion": {
+            "promoted": bool(should_promote),
+            "reason": reason,
+            **({"promoted_at": datetime.now(timezone.utc).isoformat()} if should_promote else {}),
+        },
     }
 
-    if champion_val is None:
-        should_promote = True
-        reason = "no_existing_champion"
-    else:
-        required = champion_val * (1.0 + float(args.margin))
-        should_promote = challenger_val >= required
-        reason = "meets_margin" if should_promote else "below_margin"
-
-    decision["promotion"] = {"promoted": bool(should_promote), "reason": reason}
+    # Overwrite metadata with clean schema only
+    new_meta: Dict[str, Any] = {
+        "schema_version": 2,
+        "updated_at": updated_at,
+        "metric_name": args.metric_name,
+        "last_decision": decision,
+    }
 
     if should_promote:
         s3_copy_object(
@@ -126,14 +126,6 @@ def main():
             src_key=args.challenger_model_key,
             dst_key=args.approved_model_key,
         )
-        decision["promotion"]["promoted_at"] = datetime.now(timezone.utc).isoformat()
-
-    new_meta = {
-        **approved_meta,
-        "metric_name": args.metric_name,
-        "last_decision": decision,
-    }
-    if should_promote:
         new_meta["eval"] = challenger_metrics
         new_meta["champion"] = {
             "run_id": args.run_id,
@@ -143,6 +135,12 @@ def main():
             "promoted_at": decision["promotion"]["promoted_at"],
             "value": float(challenger_val),
         }
+    else:
+        # keep existing champion info if present
+        if isinstance(approved_meta.get("eval"), dict):
+            new_meta["eval"] = approved_meta["eval"]
+        if isinstance(approved_meta.get("champion"), dict):
+            new_meta["champion"] = approved_meta["champion"]
 
     s3_write_json(s3, args.bucket_name, args.approved_meta_key, new_meta)
 
