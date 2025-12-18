@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 from datetime import datetime, timezone
+from typing import Any, Dict, Optional
 
 import boto3
 from botocore.exceptions import ClientError
@@ -33,23 +34,46 @@ def s3_write_json(s3, bucket: str, key: str, payload: dict) -> None:
     )
 
 
+def s3_copy_object(s3, bucket: str, src_key: str, dst_key: str) -> None:
+    s3.copy_object(
+        Bucket=bucket,
+        CopySource={"Bucket": bucket, "Key": src_key},
+        Key=dst_key,
+    )
+
+
+def _get_metric(d: Dict[str, Any], name: str) -> Optional[float]:
+    v = d.get(name)
+    if isinstance(v, (int, float)):
+        return float(v)
+    for path in (("eval", name), ("metrics", name), ("challenger", "metrics", name)):
+        cur: Any = d
+        ok = True
+        for p in path:
+            if isinstance(cur, dict) and p in cur:
+                cur = cur[p]
+            else:
+                ok = False
+                break
+        if ok and isinstance(cur, (int, float)):
+            return float(cur)
+    return None
+
+
 def main():
     ap = argparse.ArgumentParser()
+
     ap.add_argument("--bucket_name", required=True)
 
-    # Challenger inputs (produced by this run)
     ap.add_argument("--challenger_model_key", required=True)
     ap.add_argument("--eval_metrics_path", required=True)
 
-    # Champion pointers (stable)
     ap.add_argument("--approved_model_key", required=True)
     ap.add_argument("--approved_meta_key", required=True)
 
-    # Metric comparison
-    ap.add_argument("--metric_name", default="mean_top10_similarity")
-    ap.add_argument("--margin", type=float, default=0.005)
+    ap.add_argument("--metric_name", default="avg_genre_jaccard_at_10")
+    ap.add_argument("--margin", type=float, default=0.0)
 
-    # Optional metadata
     ap.add_argument("--run_id", default=os.getenv("RUN_ID", "unknown"))
     ap.add_argument("--git_sha", default=os.getenv("GITHUB_SHA", "manual"))
     ap.add_argument("--aws_region", default=os.getenv("AWS_REGION", ""))
@@ -61,61 +85,72 @@ def main():
     with open(args.eval_metrics_path, "r", encoding="utf-8") as f:
         challenger_metrics = json.load(f)
 
-    if args.metric_name not in challenger_metrics:
-        raise RuntimeError(
-            f"Missing metric '{args.metric_name}' in {args.eval_metrics_path}. "
-            f"Found keys: {list(challenger_metrics.keys())}"
-        )
+    challenger_val = _get_metric(challenger_metrics, args.metric_name)
+    if challenger_val is None:
+        raise RuntimeError(f"Missing metric '{args.metric_name}' in {args.eval_metrics_path}")
 
-    challenger_score = float(challenger_metrics[args.metric_name])
+    approved_meta = s3_read_json(s3, args.bucket_name, args.approved_meta_key) or {}
+    champion_val = _get_metric(approved_meta, args.metric_name)
 
-    approved_meta = s3_read_json(s3, args.bucket_name, args.approved_meta_key)
-    champion_score = None
-    if approved_meta and args.metric_name in approved_meta:
-        champion_score = float(approved_meta[args.metric_name])
-
-    # Decide
-    should_promote = False
-    if champion_score is None:
-        should_promote = True  # first model becomes champion
-    else:
-        should_promote = challenger_score > (champion_score + args.margin)
-
-    decision = {
-        "promoted": should_promote,
+    decision: Dict[str, Any] = {
+        "updated_at": datetime.now(timezone.utc).isoformat(),
         "metric_name": args.metric_name,
-        "challenger_score": challenger_score,
-        "champion_score": champion_score,
-        "margin": args.margin,
-        "challenger_model_key": args.challenger_model_key,
-        "approved_model_key": args.approved_model_key,
-        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-        "run_id": args.run_id,
-        "git_sha": args.git_sha,
+        "margin": float(args.margin),
+        "challenger": {
+            "run_id": args.run_id,
+            "git_sha": args.git_sha,
+            "model_key": args.challenger_model_key,
+            "metrics": challenger_metrics,
+            "value": float(challenger_val),
+        },
+        "champion": {
+            "model_key": args.approved_model_key,
+            "value": float(champion_val) if champion_val is not None else None,
+        },
     }
 
-    print("PROMOTION_DECISION:", json.dumps(decision, indent=2))
+    if champion_val is None:
+        should_promote = True
+        reason = "no_existing_champion"
+    else:
+        required = champion_val * (1.0 + float(args.margin))
+        should_promote = challenger_val >= required
+        reason = "meets_margin" if should_promote else "below_margin"
 
-    if not should_promote:
-        return
+    decision["promotion"] = {"promoted": bool(should_promote), "reason": reason}
 
-    # Copy challenger model to approved pointer
-    copy_source = {"Bucket": args.bucket_name, "Key": args.challenger_model_key}
-    s3.copy_object(
-        Bucket=args.bucket_name,
-        Key=args.approved_model_key,
-        CopySource=copy_source,
-    )
+    if should_promote:
+        s3_copy_object(
+            s3,
+            args.bucket_name,
+            src_key=args.challenger_model_key,
+            dst_key=args.approved_model_key,
+        )
+        decision["promotion"]["promoted_at"] = datetime.now(timezone.utc).isoformat()
 
-    # Write/update approved metadata
     new_meta = {
-        **(approved_meta or {}),
-        **decision,
+        **approved_meta,
+        "metric_name": args.metric_name,
+        "last_decision": decision,
     }
+    if should_promote:
+        new_meta["eval"] = challenger_metrics
+        new_meta["champion"] = {
+            "run_id": args.run_id,
+            "git_sha": args.git_sha,
+            "model_key": args.approved_model_key,
+            "source_model_key": args.challenger_model_key,
+            "promoted_at": decision["promotion"]["promoted_at"],
+            "value": float(challenger_val),
+        }
+
     s3_write_json(s3, args.bucket_name, args.approved_meta_key, new_meta)
 
-    print(f"Promoted model to s3://{args.bucket_name}/{args.approved_model_key}")
-    print(f"Updated metadata at s3://{args.bucket_name}/{args.approved_meta_key}")
+    if should_promote:
+        print(f"Promoted model to s3://{args.bucket_name}/{args.approved_model_key}")
+    else:
+        print("Did not promote model (kept current champion).")
+    print(f"Metadata: s3://{args.bucket_name}/{args.approved_meta_key}")
 
 
 if __name__ == "__main__":

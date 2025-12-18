@@ -1,5 +1,6 @@
 import os
 import time
+
 import kfp
 from kfp import Client
 
@@ -36,31 +37,25 @@ def main():
     if not host:
         raise RuntimeError("KUBEFLOW_HOST is not set")
 
+    client = Client(host=host)
+
     from src.pipeline import pipeline as pipeline_func
 
     kfp.compiler.Compiler().compile(
         pipeline_func=pipeline_func,
         package_path=PIPELINE_PACKAGE,
     )
-    print(f"Wrote {os.path.abspath(PIPELINE_PACKAGE)}")
-
-    client = Client(host=host)
-    print(f"Connected to KFP at {host}")
 
     pipeline_id = get_pipeline_id_by_name(client, PIPELINE_NAME)
-    version_name = f"{PIPELINE_NAME}-{os.getenv('GITHUB_SHA','manual')[:7]}-{int(time.time())}"
-
     if pipeline_id:
-        print(f"Pipeline exists: {PIPELINE_NAME} (id={pipeline_id}). Uploading version: {version_name}")
-
-        if hasattr(client, "upload_pipeline_version"):
+        print(f"Pipeline exists: {PIPELINE_NAME} ({pipeline_id}). Uploading new version...")
+        try:
             client.upload_pipeline_version(
                 pipeline_package_path=PIPELINE_PACKAGE,
-                pipeline_version_name=version_name,
+                pipeline_version_name=f"ver-{int(time.time())}",
                 pipeline_id=pipeline_id,
             )
-        else:
-            # Fallback: many KFP v2 installs treat re-upload as a new version
+        except Exception:
             client.upload_pipeline(
                 pipeline_package_path=PIPELINE_PACKAGE,
                 pipeline_name=PIPELINE_NAME,
@@ -71,8 +66,6 @@ def main():
             pipeline_package_path=PIPELINE_PACKAGE,
             pipeline_name=PIPELINE_NAME,
         )
-        pipeline_id = get_pipeline_id_by_name(client, PIPELINE_NAME)
-        print("Created pipeline, continuing...")
 
     if os.getenv("CREATE_RUN", "0") == "1":
         exp = get_or_create_experiment(client, EXPERIMENT_NAME)
@@ -80,18 +73,35 @@ def main():
         if not exp_id:
             raise RuntimeError(f"Could not determine experiment id from: {exp}")
 
-        sha = os.getenv("GITHUB_SHA", "manual")[:7]
-        run_name = f"animeops-{sha}-{int(time.time())}"
-        model_key = f"models/anime_recommender/runs/{run_name}/model.joblib"
+        full_sha = os.getenv("GITHUB_SHA", "")
+        sha7 = (full_sha or "manual")[:7]
+        run_name = f"animeops-{sha7}-{int(time.time())}"
 
         arguments = {
             "bucket_name": os.getenv("BUCKET_NAME", "mlops-anime-data"),
             "data_key": os.getenv("DATA_KEY", "cleaned_anime_data.csv"),
-            "model_key": model_key,
-            "approved_model_key": "models/anime_recommender/approved/model.joblib",
-            "approved_meta_key": "models/anime_recommender/approved/metadata.json",
-            "min_mean_similarity": float(os.getenv("MIN_MEAN_SIM", "0.15")),
-            "promotion_margin": float(os.getenv("PROMOTION_MARGIN", "0.005")),
+            "runs_prefix": os.getenv("RUNS_PREFIX", "models/anime_recommender/runs"),
+            "run_id": run_name,
+            "git_sha": full_sha,
+
+            "max_features": int(os.getenv("MAX_FEATURES", "50000")),
+            "ngram_max": int(os.getenv("NGRAM_MAX", "2")),
+            "min_df": int(os.getenv("MIN_DF", "2")),
+
+            "eval_k": int(os.getenv("EVAL_K", "10")),
+            "min_avg_genre_jaccard": float(os.getenv("MIN_AVG_GENRE_JACCARD", "0.40")),
+
+            "promotion_metric_name": os.getenv("PROMOTION_METRIC_NAME", "avg_genre_jaccard_at_10"),
+            "promotion_margin": float(os.getenv("PROMOTION_MARGIN", "0.00")),
+
+            "approved_model_key": os.getenv(
+                "APPROVED_MODEL_KEY",
+                "models/anime_recommender/approved/model.joblib",
+            ),
+            "approved_meta_key": os.getenv(
+                "APPROVED_META_KEY",
+                "models/anime_recommender/approved/metadata.json",
+            ),
         }
 
         print("Creating run with arguments:", arguments)
