@@ -50,9 +50,8 @@ jobs:
               - "src/serving/**"
               - "requirements.txt"
 
-            # Deploy (compile/upload) Kubeflow pipeline when:
-            # - pipeline code or deploy scripts change, OR
-            # - images/deps change (so the pipeline picks up the new image tags)
+            # Deploy Kubeflow pipeline when pipeline code/deploy scripts/workflow changes,
+            # or when images/deps change (so compiled pipeline picks new image tags).
             pipeline:
               - "src/**"
               - "scripts/**"
@@ -61,10 +60,11 @@ jobs:
               - "components/serving/**"
               - "requirements.txt"
 
-            # Apply k8s manifests when k8s changes (do not couple to serving rebuild)
+            # Apply k8s manifests only when k8s/** changes
             k8s:
               - "k8s/**"
 
+            # Upload static UI assets only when ui/** changes
             ui:
               - "ui/**"
 
@@ -73,7 +73,7 @@ jobs:
   # -------------------------
   upload-ui:
     needs: [changes]
-    if: needs.changes.outputs.ui == 'true'
+    if: ${{ needs.changes.result == 'success' && needs.changes.outputs.ui == 'true' }}
     runs-on: self-hosted
     env:
       AWS_REGION: eu-west-3
@@ -102,7 +102,7 @@ jobs:
   # -------------------------
   build-serving:
     needs: [changes]
-    if: needs.changes.outputs.serving == 'true'
+    if: ${{ needs.changes.result == 'success' && needs.changes.outputs.serving == 'true' }}
     runs-on: self-hosted
     env:
       DOCKERHUB_REPO_APP: mmdocker06/anime-ops-app
@@ -136,7 +136,7 @@ jobs:
   # -------------------------
   build-training:
     needs: [changes]
-    if: needs.changes.outputs.training == 'true'
+    if: ${{ needs.changes.result == 'success' && needs.changes.outputs.training == 'true' }}
     runs-on: self-hosted
     env:
       DOCKERHUB_REPO_TRAIN: mmdocker06/anime-ops-training
@@ -170,8 +170,9 @@ jobs:
   # -------------------------
   deploy-pipeline:
     needs: [changes, build-training, build-serving]
-    # Run even if build jobs were skipped; do NOT run if any needed build failed.
-    if: ${{ always() && needs.changes.outputs.pipeline == 'true' && needs.build-training.result != 'failure' && needs.build-serving.result != 'failure' }}
+    # Run even if build jobs were skipped; do NOT run if any needed build failed/cancelled,
+    # and only if the pipeline filter matched.
+    if: ${{ always() && needs.changes.result == 'success' && needs.changes.outputs.pipeline == 'true' && needs.build-training.result != 'failure' && needs.build-training.result != 'cancelled' && needs.build-serving.result != 'failure' && needs.build-serving.result != 'cancelled' }}
     runs-on: self-hosted
     env:
       DOCKERHUB_REPO_APP: mmdocker06/anime-ops-app
@@ -188,6 +189,7 @@ jobs:
 
       - name: Install deps
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
@@ -196,22 +198,26 @@ jobs:
           set -euo pipefail
 
           if [ "${{ needs.build-training.result }}" = "success" ]; then
-            echo "TRAINING_IMAGE=${{ env.DOCKERHUB_REPO_TRAIN }}:${{ github.sha }}" >> "$GITHUB_ENV"
+            TRAINING_IMAGE="${{ env.DOCKERHUB_REPO_TRAIN }}:${{ github.sha }}"
           else
-            echo "TRAINING_IMAGE=${{ env.DOCKERHUB_REPO_TRAIN }}:latest" >> "$GITHUB_ENV"
+            TRAINING_IMAGE="${{ env.DOCKERHUB_REPO_TRAIN }}:latest"
           fi
 
           if [ "${{ needs.build-serving.result }}" = "success" ]; then
-            echo "SERVING_IMAGE=${{ env.DOCKERHUB_REPO_APP }}:${{ github.sha }}" >> "$GITHUB_ENV"
+            SERVING_IMAGE="${{ env.DOCKERHUB_REPO_APP }}:${{ github.sha }}"
           else
-            echo "SERVING_IMAGE=${{ env.DOCKERHUB_REPO_APP }}:latest" >> "$GITHUB_ENV"
+            SERVING_IMAGE="${{ env.DOCKERHUB_REPO_APP }}:latest"
           fi
+
+          echo "TRAINING_IMAGE=$TRAINING_IMAGE" >> "$GITHUB_ENV"
+          echo "SERVING_IMAGE=$SERVING_IMAGE" >> "$GITHUB_ENV"
 
           echo "TRAINING_IMAGE=$TRAINING_IMAGE"
           echo "SERVING_IMAGE=$SERVING_IMAGE"
 
       - name: Check KFP API reachable
         run: |
+          set -euo pipefail
           curl -sS -m 5 "$KFP_HOST/apis/v1beta1/healthz" \
             || (echo "KFP API not reachable at $KFP_HOST" && exit 1)
 
@@ -229,8 +235,8 @@ jobs:
   # -------------------------
   deploy-serving:
     needs: [changes, build-serving]
-    # Run even if build-serving was skipped; do NOT run if build-serving failed.
-    if: ${{ always() && (needs.changes.outputs.k8s == 'true' || needs.changes.outputs.serving == 'true') && needs.build-serving.result != 'failure' }}
+    # Run even if build-serving was skipped; do NOT run if build-serving failed/cancelled.
+    if: ${{ always() && needs.changes.result == 'success' && (needs.changes.outputs.k8s == 'true' || needs.changes.outputs.serving == 'true') && needs.build-serving.result != 'failure' && needs.build-serving.result != 'cancelled' }}
     runs-on: self-hosted
     env:
       DOCKERHUB_REPO_APP: mmdocker06/anime-ops-app
