@@ -4,6 +4,15 @@ metadata:
   name: argo-events
 ---
 apiVersion: argoproj.io/v1alpha1
+kind: EventBus
+metadata:
+  name: default
+  namespace: argo-events
+spec:
+  jetstream:
+    version: latest
+---
+apiVersion: argoproj.io/v1alpha1
 kind: EventSource
 metadata:
   name: sqs-webhook-source
@@ -19,117 +28,6 @@ spec:
       endpoint: /s3csv
       method: POST
       jsonBody: true
----
-apiVersion: argoproj.io/v1alpha1
-kind: Sensor
-metadata:
-  name: s3-kfp-sensor
-  namespace: argo-events
-spec:
-  template:
-    serviceAccountName: argo-events-sa
-  dependencies:
-    - name: webhook-dep
-      eventSourceName: sqs-webhook-source
-      eventName: s3csv
-  triggers:
-    - template:
-        name: kfp-trigger
-        k8s:
-          operation: create
-          source:
-            resource:
-              apiVersion: batch/v1
-              kind: Job
-              metadata:
-                generateName: trigger-pipeline-
-                namespace: kubeflow
-              spec:
-                backoffLimit: 2
-                template:
-                  spec:
-                    restartPolicy: Never
-                    containers:
-                      - name: trigger
-                        image: python:3.11-slim
-                        command: ["/bin/sh", "-lc"]
-                        env:
-                          - name: EVENT_DATA
-                            value: "placeholder"
-                          - name: KFP_HOST
-                            value: "http://ml-pipeline.kubeflow.svc.cluster.local:8888"
-                          - name: KFP_PIPELINE_ID
-                            value: "316fb075-2457-436a-9ada-fc723c9b827d"
-                          - name: KFP_EXPERIMENT_NAME
-                            value: "S3-Event-Triggered"
-                          - name: ALLOW_BUCKET
-                            value: "mlops-anime-data"
-                          - name: ALLOW_SUFFIX
-                            value: ".csv"
-                        args:
-                          - |
-                            pip install --no-cache-dir kfp==2.7.0 && python - <<'PY'
-                            import json, os, sys, time
-                            from urllib.parse import unquote_plus
-                            import kfp
-
-                            raw = os.environ.get("EVENT_DATA","{}")
-                            evt = json.loads(raw)
-
-                            if "Records" in evt:
-                                s3_event = evt
-                            elif "Message" in evt:
-                                s3_event = json.loads(evt["Message"])
-                            else:
-                                print("Skip: unknown event format keys=", list(evt.keys()))
-                                sys.exit(0)
-
-                            recs = s3_event.get("Records", [])
-                            if not recs:
-                                print("Skip: no Records")
-                                sys.exit(0)
-
-                            bucket = recs[0]["s3"]["bucket"]["name"]
-                            key = unquote_plus(recs[0]["s3"]["object"]["key"])
-
-                            allow_bucket = os.getenv("ALLOW_BUCKET","")
-                            allow_suffix = os.getenv("ALLOW_SUFFIX","")
-                            allow_key_exact = os.getenv("ALLOW_KEY_EXACT","")
-
-                            if allow_bucket and bucket != allow_bucket:
-                                sys.exit(0)
-                            if allow_suffix and not key.endswith(allow_suffix):
-                                sys.exit(0)
-                            if allow_key_exact and key != allow_key_exact:
-                                sys.exit(0)
-
-                            client = kfp.Client(host=os.environ["KFP_HOST"])
-
-                            exp_name = os.getenv("KFP_EXPERIMENT_NAME","S3-Event-Triggered")
-                            try:
-                                exp = client.get_experiment(experiment_name=exp_name)
-                            except Exception:
-                                exp = client.create_experiment(name=exp_name)
-
-                            params = {
-                                "bucket_name": bucket,
-                                "data_key": key,
-                                "model_key": f"models/anime_recommender/runs/s3/{int(time.time())}/model.joblib",
-                            }
-
-                            run = client.run_pipeline(
-                                experiment_id=exp.experiment_id,
-                                job_name=f"Auto-Run-{int(time.time())}",
-                                pipeline_id=os.environ["KFP_PIPELINE_ID"],
-                                params=params,
-                            )
-                            print("Triggered run_id:", run.run_id)
-                            PY
-          parameters:
-            - src:
-                dependencyName: webhook-dep
-                dataKey: body
-              dest: spec.template.spec.containers.0.env.0.value
 ---
 apiVersion: v1
 kind: ServiceAccount
