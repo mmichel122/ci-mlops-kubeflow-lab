@@ -73,32 +73,38 @@ def main():
     meta = artifact.get("meta", {}) or {}
     genres = meta.get("Genres") or [""] * len(titles)
 
-    k = int(args.k)
     created_at = datetime.now(timezone.utc).isoformat()
 
+    # Similarity matrix
     S = cosine_similarity(X)
+    n = S.shape[0]
 
-    # Top-k (exclude self)
-    idx = np.argpartition(-S, kth=range(0, min(k + 1, S.shape[1])), axis=1)[:, : k + 1]
-    row = np.arange(S.shape[0])[:, None]
-    idx = idx[np.argsort(-S[row, idx], axis=1)]
-    topk = []
-    for i in range(S.shape[0]):
-        cand = [j for j in idx[i].tolist() if j != i]
-        topk.append(cand[:k])
-    topk = np.array(topk, dtype=int)
+    # Effective k (cannot recommend more than n-1 items)
+    k_eff = min(int(args.k), max(n - 1, 1))
 
-    mean_topk_similarity = float(np.mean(S[row[:, 0], topk])) if len(topk) else 0.0
+    # Exclude self from retrieval
+    np.fill_diagonal(S, -np.inf)
+
+    # Get top-k_eff indices (unsorted) per row: shape (n, k_eff)
+    topk = np.argpartition(-S, kth=k_eff - 1, axis=1)[:, :k_eff]
+
+    # Sort those indices by similarity descending using take_along_axis
+    topk_sims = np.take_along_axis(S, topk, axis=1)      # (n, k_eff)
+    order = np.argsort(-topk_sims, axis=1)               # (n, k_eff)
+    topk = np.take_along_axis(topk, order, axis=1)       # (n, k_eff)
+    topk_sims = np.take_along_axis(S, topk, axis=1)      # (n, k_eff)
+
+    mean_topk_similarity = float(topk_sims.mean()) if topk_sims.size else 0.0
     avg_genre_jaccard = _avg_genre_jaccard_at_k(genres, topk)
 
     eval_metrics = {
         "created_at": created_at,
         "model_key": args.model_key,
         "run_id": args.run_id or artifact.get("provenance", {}).get("run_id"),
-        "num_items": int(S.shape[0]),
-        "k": k,
-        f"avg_genre_jaccard_at_{k}": float(avg_genre_jaccard),
-        f"mean_top{k}_similarity": float(mean_topk_similarity),
+        "num_items": int(n),
+        "k": int(k_eff),
+        f"avg_genre_jaccard_at_{k_eff}": float(avg_genre_jaccard),
+        f"mean_top{k_eff}_similarity": float(mean_topk_similarity),
     }
 
     os.makedirs(os.path.dirname(args.metrics_path), exist_ok=True)
@@ -115,7 +121,7 @@ def main():
             json.dump(eval_metrics, f, indent=2)
         upload_to_s3(tmp, args.bucket_name, f"{runs_prefix}/{run_id}/eval_metrics.json")
 
-    metric_name = f"avg_genre_jaccard_at_{k}"
+    metric_name = f"avg_genre_jaccard_at_{k_eff}"
     if eval_metrics[metric_name] < args.min_avg_genre_jaccard:
         raise RuntimeError(
             f"Model quality too low: {metric_name}={eval_metrics[metric_name]:.4f} < {args.min_avg_genre_jaccard:.4f}"
