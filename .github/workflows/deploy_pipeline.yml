@@ -38,34 +38,38 @@ jobs:
         uses: dorny/paths-filter@v3
         with:
           filters: |
+            # Rebuild TRAINING image only when its build context or training code/deps change
             training:
               - "components/training/**"
-              - "requirements.txt"
               - "src/training/**"
-              - "scripts/**"
+              - "requirements.txt"
 
+            # Rebuild SERVING image only when its build context or serving code/deps change
             serving:
               - "components/serving/**"
-              - "requirements.txt"
               - "src/serving/**"
-
-            pipeline:
-              - "components/training/**"
               - "requirements.txt"
-              - "src/training/**"
+
+            # Deploy (compile/upload) Kubeflow pipeline when:
+            # - pipeline code or deploy scripts change, OR
+            # - images/deps change (so the pipeline picks up the new image tags)
+            pipeline:
+              - "src/**"
               - "scripts/**"
               - ".github/workflows/**"
+              - "components/training/**"
+              - "components/serving/**"
+              - "requirements.txt"
 
+            # Apply k8s manifests when k8s changes (do not couple to serving rebuild)
             k8s:
               - "k8s/**"
-              - "components/serving/**"
 
             ui:
               - "ui/**"
 
   # -------------------------
   # Upload UI to S3 (static site assets)
-  # Runs only when ui/** changes
   # -------------------------
   upload-ui:
     needs: [changes]
@@ -166,7 +170,8 @@ jobs:
   # -------------------------
   deploy-pipeline:
     needs: [changes, build-training, build-serving]
-    if: needs.changes.outputs.pipeline == 'true'
+    # Run even if build jobs were skipped; do NOT run if any needed build failed.
+    if: ${{ always() && needs.changes.outputs.pipeline == 'true' && needs.build-training.result != 'failure' && needs.build-serving.result != 'failure' }}
     runs-on: self-hosted
     env:
       DOCKERHUB_REPO_APP: mmdocker06/anime-ops-app
@@ -186,6 +191,25 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Resolve image tags
+        run: |
+          set -euo pipefail
+
+          if [ "${{ needs.build-training.result }}" = "success" ]; then
+            echo "TRAINING_IMAGE=${{ env.DOCKERHUB_REPO_TRAIN }}:${{ github.sha }}" >> "$GITHUB_ENV"
+          else
+            echo "TRAINING_IMAGE=${{ env.DOCKERHUB_REPO_TRAIN }}:latest" >> "$GITHUB_ENV"
+          fi
+
+          if [ "${{ needs.build-serving.result }}" = "success" ]; then
+            echo "SERVING_IMAGE=${{ env.DOCKERHUB_REPO_APP }}:${{ github.sha }}" >> "$GITHUB_ENV"
+          else
+            echo "SERVING_IMAGE=${{ env.DOCKERHUB_REPO_APP }}:latest" >> "$GITHUB_ENV"
+          fi
+
+          echo "TRAINING_IMAGE=$TRAINING_IMAGE"
+          echo "SERVING_IMAGE=$SERVING_IMAGE"
+
       - name: Check KFP API reachable
         run: |
           curl -sS -m 5 "$KFP_HOST/apis/v1beta1/healthz" \
@@ -193,20 +217,20 @@ jobs:
 
       - name: Compile & deploy pipeline
         env:
-          TRAINING_IMAGE: ${{ env.DOCKERHUB_REPO_TRAIN }}:${{ github.sha }}
-          SERVING_IMAGE: ${{ env.DOCKERHUB_REPO_APP }}:${{ github.sha }}
           CREATE_RUN: "1"
         run: |
+          set -euo pipefail
           export KUBEFLOW_HOST="${KFP_HOST}"
           export PYTHONPATH="${GITHUB_WORKSPACE}"
           python scripts/deploy.py
 
   # -------------------------
-  # Deploy serving app manifests + pin image (if rebuilt)
+  # Deploy serving app manifests + optionally pin image
   # -------------------------
   deploy-serving:
     needs: [changes, build-serving]
-    if: needs.changes.outputs.k8s == 'true' || needs.changes.outputs.serving == 'true'
+    # Run even if build-serving was skipped; do NOT run if build-serving failed.
+    if: ${{ always() && (needs.changes.outputs.k8s == 'true' || needs.changes.outputs.serving == 'true') && needs.build-serving.result != 'failure' }}
     runs-on: self-hosted
     env:
       DOCKERHUB_REPO_APP: mmdocker06/anime-ops-app
@@ -221,7 +245,8 @@ jobs:
 
           sudo kubectl apply -f k8s/manifest.yaml
 
-          if [ "${{ needs.changes.outputs.serving }}" = "true" ]; then
+          # Only pin the sha tag if we built/pushed it in THIS workflow run
+          if [ "${{ needs.build-serving.result }}" = "success" ]; then
             sudo kubectl -n animeops-serving set image \
               deploy/animeops-serving \
               api=${{ env.DOCKERHUB_REPO_APP }}:${{ github.sha }}
